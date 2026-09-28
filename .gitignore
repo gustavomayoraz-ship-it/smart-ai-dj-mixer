@@ -1,0 +1,22 @@
+# --- Entornos / cache de Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Datos generados por el programa (no son código) ---
+cache/
+logs/
+config/
+
+# --- Paquetes .whl para instalar sin internet (pesan cientos de MB,
+#     no entran en GitHub -- quien clone el repo los baja con pip) ---
+dependencias_offline/
+
+# --- Salida de PyInstaller (build_exe.bat) ---
+build/
+dist/
+*.spec
+
+# --- Archivos de IDEs ---
+.vscode/
+.idea/

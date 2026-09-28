@@ -1,0 +1,8 @@
+PySide6
+pygame
+librosa
+numpy
+scipy
+sounddevice
+soundfile
+audiotsm
