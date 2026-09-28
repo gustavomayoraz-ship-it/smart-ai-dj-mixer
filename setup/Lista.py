@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 # grupo "🪟 Ventana"). Es un dict mutable, no constantes sueltas, para que
 # el cambio se vea al toque sin reiniciar el programa.
 from setup.ajustes import PARAMETROS_VENTANA
-from idiomas import tr
+from setup.idiomas import tr
 
 # Corrección fina horizontal para que la lista quede alineada exacto
 # contra el borde izquierdo del reproductor cuando se pega "abajo"/

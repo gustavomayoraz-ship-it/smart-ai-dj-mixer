@@ -60,7 +60,7 @@ from dj_player_Mixer import (
     ESTILO_POR_DEFECTO,
     _cargar_estilos_disponibles,
 )
-from idiomas import tr
+from setup.idiomas import tr
 
 from setup.Lista import (
     VentanaListaSeparada,

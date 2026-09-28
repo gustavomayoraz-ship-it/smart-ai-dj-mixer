@@ -29,7 +29,7 @@ from dj_player_Mixer import (
     aplicar_estilo_global,
     guardar_config_app,
 )
-from idiomas import tr, IDIOMAS_DISPONIBLES, IDIOMA_POR_DEFECTO, establecer_idioma, idioma_actual
+from setup.idiomas import tr, IDIOMAS_DISPONIBLES, IDIOMA_POR_DEFECTO, establecer_idioma, idioma_actual
 
 
 # ================================================================

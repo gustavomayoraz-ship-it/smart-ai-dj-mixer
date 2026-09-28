@@ -976,7 +976,7 @@ def main():
     # Idioma de la interfaz -- se fija ACÁ, antes de armar cualquier
     # ventana, para que todo lo que se construya de acá en más (Ajustes,
     # y a futuro el resto de la app) ya nazca en el idioma guardado.
-    from idiomas import establecer_idioma
+    from setup.idiomas import establecer_idioma
     establecer_idioma(config_data.get("idioma", "es"))
 
     from setup.Principal import lanzar_app

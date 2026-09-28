@@ -6,7 +6,7 @@ portugués) + helpers para consultar y cambiar el idioma activo.
 
 Cómo se usa en el resto del código:
 
-    from idiomas import tr, IDIOMAS_DISPONIBLES, establecer_idioma
+    from setup.idiomas import tr, IDIOMAS_DISPONIBLES, establecer_idioma
 
     grupo = QGroupBox(tr("ajustes_teclas_titulo"))
 
