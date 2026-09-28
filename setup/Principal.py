@@ -79,6 +79,8 @@ from setup.ajustes import (
     _ESTADO_ORDEN_ENERGIA,
     PARAMETROS_VENTANA,
     cargar_parametros_ventana,
+    DEF_NORMALIZAR_VOLUMEN,
+    DEF_NIVEL_NORMALIZADOR_DB,
 )
 
 
@@ -4249,9 +4251,19 @@ class SmartDJPlayer(QMainWindow):
             notificar=self.puente_analisis.pista_actualizada.emit)
 
         self.engine = SeamlessMixerEngine()
+        # OJO: estos valores por defecto tienen que ser los MISMOS que
+        # usa ajustes.py (DEF_NORMALIZAR_VOLUMEN / DEF_NIVEL_NORMALIZADOR_DB)
+        # -- antes acá había un "8" hardcodeado que no coincidía con el
+        # "-5" de ajustes.py, entonces si todavía no existía la clave
+        # "nivel_normalizador_db" en la config guardada (primera vez que
+        # se abre el programa, o una config vieja sin esa clave), Ajustes
+        # mostraba -5 dB tildado pero el motor arrancaba normalizando a
+        # +8 dB -- sonaba fuerte hasta que se tocaba "Restaurar" (que sí
+        # sincronizaba los dos lados). Usando las mismas constantes acá
+        # se elimina ese desfasaje.
         self.engine.set_normalizador(
-            bool(self.config_data.get("normalizar_volumen", True)),
-            self.config_data.get("nivel_normalizador_db", 8))
+            bool(self.config_data.get("normalizar_volumen", DEF_NORMALIZAR_VOLUMEN)),
+            self.config_data.get("nivel_normalizador_db", DEF_NIVEL_NORMALIZADOR_DB))
         self.engine.set_rampa_tempo(float(self.config_data.get("rampa_tempo_seg", 5.0)))
         self.engine.set_puntos_cruce(
             float(self.config_data.get("punto_a_cruce", 0.0)),

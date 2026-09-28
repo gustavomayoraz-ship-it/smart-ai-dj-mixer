@@ -1,5 +1,4 @@
 {
-  "nombre": "Pandemic",
   "fondo_ventana": "#141414",
   "fondo_panel": "#1e1e1e",
   "fondo_widget": "#000000",
@@ -9,23 +8,11 @@
   "texto_normal": "#ffffff",
   "texto_secundario": "#9aa0a6",
   "acento": "#aaff00",
+  "color_slider": "#aaff00",
   "acento_oscuro": "#0d3d2a",
   "borde": "#ff0000",
-  "borde_fuerte": "#ffff00",
+  "borde_fuerte": "#4a4a4a",
   "seleccion_fondo": "#0d3d2a",
   "seleccion_texto": "#00ff80",
-  "lista_fila_reproduciendo": "#009f00",
-  "lista_fila_reproduciendo_texto": "#ffffff",
-  "lista_fila_siguiente": "#32609c",
-  "lista_fila_siguiente_texto": "#b4dcff",
-  "lista_fila_seleccionada": "#b1761d",
-  "lista_fila_seleccionada_texto": "#ffe6b4",
-  "lista_fila_normal_1": "#2a2a2a",
-  "lista_fila_normal_2": "#2d2d2d",
-  "lista_fila_normal_texto": "#d7d7d7",
-  "lista_fila_saltear": "#6c6a31",
-  "lista_fila_saltear_texto": "#787878",
-  "color_flechas_selector": "#e0e0e0",
-  "separador_fondo": "#14324a",
-  "separador_texto": "#bfe2ff"
+  "nombre": "Pandemic"
 }
