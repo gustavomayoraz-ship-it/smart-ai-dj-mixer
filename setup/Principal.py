@@ -60,6 +60,7 @@ from dj_player_Mixer import (
     ESTILO_POR_DEFECTO,
     _cargar_estilos_disponibles,
 )
+from idiomas import tr
 
 from setup.Lista import (
     VentanaListaSeparada,
@@ -2418,7 +2419,7 @@ class WaveformWidget(QWidget):
         painter.fillRect(0, 0, width, height, QColor(10, 10, 12))
         if len(self.peaks) == 0:
             painter.setPen(QColor(130, 130, 130))
-            painter.drawText(self.rect(), Qt.AlignCenter, f"{self.title_label}: Sin datos")
+            painter.drawText(self.rect(), Qt.AlignCenter, f"{self.title_label}: {tr('ppal_sin_datos')}")
             return
         mid_y = height / 2
         zona = self._zona_mezcla_px()
@@ -3907,7 +3908,7 @@ class _OverlayEspera(QWidget):
         self.setStyleSheet("background-color: rgba(0, 0, 0, 195);")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 0, 20, 0)
-        self.lbl_mensaje = QLabel("⏳ Analizando temas, esperá un momento...")
+        self.lbl_mensaje = QLabel(tr("ppal_overlay_analizando"))
         self.lbl_mensaje.setStyleSheet("color: white; font-size: 12pt; font-weight: bold;")
         self.lbl_mensaje.setAlignment(Qt.AlignCenter)
         self.lbl_mensaje.setWordWrap(True)
@@ -4058,13 +4059,13 @@ class BarraTituloPersonalizada(QWidget):
             self.btn_minimizar = QPushButton("🗕")
             self.btn_minimizar.setObjectName("btnMinimizarVentana")
             self.btn_minimizar.setFixedSize(30, 24)
-            self.btn_minimizar.setToolTip("Minimizar")
+            self.btn_minimizar.setToolTip(tr("ppal_tooltip_minimizar"))
             self.btn_minimizar.clicked.connect(self._minimizar)
             layout.addWidget(self.btn_minimizar)
         self.btn_cerrar = QPushButton("✕")
         self.btn_cerrar.setObjectName("btnCerrarVentana")
         self.btn_cerrar.setFixedSize(30, 24)
-        self.btn_cerrar.setToolTip("Cerrar")
+        self.btn_cerrar.setToolTip(tr("ppal_tooltip_cerrar_ventana"))
         self.btn_cerrar.clicked.connect(self._cerrar)
         layout.addWidget(self.btn_cerrar)
         self._callback_cerrar = None
@@ -4312,9 +4313,9 @@ class SmartDJPlayer(QMainWindow):
         if rutas_guardadas:
             self._cargar_rutas_en_playlist(
                 rutas_guardadas,
-                f"Lista recuperada de la sesión anterior ({len(rutas_guardadas)} pistas).")
+                tr("ppal_lista_recuperada").format(n=len(rutas_guardadas)))
         else:
-            self.update_status("Lista vacía. Arrastrá archivos o usá 📂 Cargar carpeta.")
+            self.update_status(tr("ppal_lista_vacia_arrastra"))
 
         # Si el tema que quedó cargado en la bandeja A la última vez que
         # se cerró el programa sigue estando en la lista, lo recargamos
@@ -4359,8 +4360,8 @@ class SmartDJPlayer(QMainWindow):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(4)
-        self.lbl_deck_a = QLabel("Deck A: (sin tema)")
-        self.waveform_current = WaveformWidget(title="Deck A", is_incoming_deck=False)
+        self.lbl_deck_a = QLabel(tr("ppal_deck_a_vacio"))
+        self.waveform_current = WaveformWidget(title=tr("ppal_deck_a_nombre"), is_incoming_deck=False)
         self.waveform_current.seek_requested.connect(self.on_waveform_seek)
         self.waveform_current.zona_mezcla_movida.connect(self.on_zona_mezcla_movida)
         grupo_deck_a = QVBoxLayout()
@@ -4369,15 +4370,13 @@ class SmartDJPlayer(QMainWindow):
         grupo_deck_a.addWidget(self.lbl_deck_a)
         grupo_deck_a.addWidget(self.waveform_current, 1)
 
-        self.lbl_deck_b = QLabel("Deck B: (sin tema en espera)")
-        self.waveform_next = WaveformWidget(title="Deck B", is_incoming_deck=True)
+        self.lbl_deck_b = QLabel(tr("ppal_deck_b_vacio"))
+        self.waveform_next = WaveformWidget(title=tr("ppal_deck_b_nombre"), is_incoming_deck=True)
         self.waveform_next.anclaje_zona_b = (
             "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
             else "downbeat")
         self.waveform_next.punto_entrada_b_movido.connect(self.on_punto_entrada_b_movido)
-        self.waveform_next.setToolTip(
-            "Arrastrá el recuadro amarillo para mover a mano el punto\n"
-            "donde este tema entra en la próxima mezcla.")
+        self.waveform_next.setToolTip(tr("ppal_tooltip_waveform_next"))
         grupo_deck_b = QVBoxLayout()
         grupo_deck_b.setContentsMargins(0, 0, 0, 0)
         grupo_deck_b.setSpacing(0)
@@ -4385,10 +4384,7 @@ class SmartDJPlayer(QMainWindow):
         grupo_deck_b.addWidget(self.waveform_next, 1)
 
         self.barra_golpe_seco = BarraGolpeSeco(ancho=8)
-        self.barra_golpe_seco.setToolTip(
-            "Golpe seco: nivel de energía del bombo (banda 60-120 Hz)\n"
-            "del tema entrante, medido en vivo. Se ilumina cuando hay\n"
-            "golpe de bombo y baja solo entre golpes.")
+        self.barra_golpe_seco.setToolTip(tr("ppal_tooltip_golpe_seco_barra"))
         columna_decks = QVBoxLayout()
         columna_decks.setContentsMargins(0, 0, 0, 0)
         columna_decks.setSpacing(0)
@@ -4403,13 +4399,13 @@ class SmartDJPlayer(QMainWindow):
         main_layout.addLayout(fila_decks, 1)
 
         cfg_layout = QHBoxLayout()
-        cfg_layout.addWidget(QLabel("Volumen Master:"))
+        cfg_layout.addWidget(QLabel(tr("ppal_volumen_master_etiqueta")))
         self.sld_master = QSlider(Qt.Horizontal)
         self.sld_master.setStyleSheet(ESTILO_SLIDER_VOLUMEN)
         self.sld_master.setRange(0, 100)
         volumen_inicial = int(self.config_data.get("volumen_maestro", 100))
         self.sld_master.setValue(volumen_inicial)
-        self.sld_master.setToolTip("Volumen general de la salida. Afecta a A y a B por igual.")
+        self.sld_master.setToolTip(tr("ppal_tooltip_volumen_master"))
         self.sld_master.valueChanged.connect(self.on_master_vol_changed)
         cfg_layout.addWidget(self.sld_master, 1)
         self.lbl_master_val = QLabel(f"{volumen_inicial}%")
@@ -4418,16 +4414,15 @@ class SmartDJPlayer(QMainWindow):
         self.engine.set_master_volume(volumen_inicial)
         self.btn_config = QPushButton("⚙")
         self.btn_config.setFixedWidth(36)
-        self.btn_config.setToolTip(
-            "Abrir Ajustes (teclas, normalizador, brillo, cruce, efectos, orden, carga).")
+        self.btn_config.setToolTip(tr("ppal_tooltip_btn_config"))
         self.btn_config.clicked.connect(self.abrir_configuracion_teclas)
         cfg_layout.addWidget(self.btn_config)
         main_layout.addLayout(cfg_layout)
         self.info_panel = QFrame()
-        self.lbl_status = QLabel("Estado: Esperando música...")
+        self.lbl_status = QLabel(f"{tr('ppal_estado_prefijo')}: {tr('ppal_estado_inicial')}")
         self.lbl_status.setStyleSheet("color: #7f8c8d; font-size: 11px;")
         self.lbl_status.hide()
-        self.lbl_track = QLabel("Pista actual: Ninguna")
+        self.lbl_track = QLabel(f"{tr('ppal_pista_actual_prefijo')}: {tr('ppal_pista_actual_ninguna')}")
         self.lbl_track.setStyleSheet("color: #7f8c8d; font-size: 11px;")
         self.lbl_track.hide()
         self.progress_bar = QProgressBar()
@@ -4444,13 +4439,10 @@ class SmartDJPlayer(QMainWindow):
         self.btn_next.setStyleSheet(ESTILO_BOTON_AMARILLO)
         self.btn_play.setStyleSheet(ESTILO_BOTON_PLAY)
         self.btn_stop.setStyleSheet(ESTILO_BOTON_STOP)
-        self.btn_prev.setToolTip("Mezclar hacia el tema anterior (adelanta el recuadro a la próxima frase).")
-        self.btn_next.setToolTip("Mezclar hacia el tema siguiente (adelanta el recuadro a la próxima frase).")
-        self.btn_play.setToolTip("Reproducir / Pausar.")
-        self.btn_stop.setToolTip(
-            "Primer click: pausa (no saca los temas de las bandejas).\n"
-            "Segundo click (ya detenido): vacía las bandejas y vuelve\n"
-            "al principio de la lista.")
+        self.btn_prev.setToolTip(tr("ppal_tooltip_prev"))
+        self.btn_next.setToolTip(tr("ppal_tooltip_next"))
+        self.btn_play.setToolTip(tr("ppal_tooltip_play"))
+        self.btn_stop.setToolTip(tr("ppal_tooltip_stop"))
         self.btn_prev.clicked.connect(self.trigger_prev_mix)
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_stop.clicked.connect(self.stop_audio)
@@ -4463,37 +4455,25 @@ class SmartDJPlayer(QMainWindow):
         btn_layout.addStretch()
         main_layout.addLayout(btn_layout)
         fila_botones_lista = QHBoxLayout()
-        self.btn_limpiar_lista = QPushButton("🗑 Limpiar lista")
+        self.btn_limpiar_lista = QPushButton(tr("ppal_btn_limpiar_lista"))
         self.btn_limpiar_lista.setStyleSheet(ESTILO_BOTON_LIMPIAR)
-        self.btn_limpiar_lista.setToolTip("Elimina todos los temas de la lista (pide confirmación).")
+        self.btn_limpiar_lista.setToolTip(tr("ppal_tooltip_limpiar_lista"))
         self.btn_limpiar_lista.clicked.connect(self.limpiar_lista_completa)
         fila_botones_lista.addWidget(self.btn_limpiar_lista)
-        self.btn_reordenar_auto = QPushButton("🔀 Reordenar auto")
+        self.btn_reordenar_auto = QPushButton(tr("ppal_btn_reordenar_auto"))
         self.btn_reordenar_auto.setStyleSheet(ESTILO_BOTON_REORDENAR)
-        self.btn_reordenar_auto.setToolTip(
-            "Vuelve a ordenar toda la lista automáticamente (según BPM o Tono,\n"
-            "lo que tengas elegido en Ajustes) y reactiva el orden automático,\n"
-            "que se apaga cuando movés temas a mano.")
+        self.btn_reordenar_auto.setToolTip(tr("ppal_tooltip_reordenar_auto"))
         self.btn_reordenar_auto.clicked.connect(self.reactivar_orden_automatico)
         fila_botones_lista.addWidget(self.btn_reordenar_auto)
-        self.btn_mostrar_lista = QPushButton("📋 Ocultar lista")
-        self.btn_mostrar_lista.setToolTip(
-            "Muestra u oculta la ventana de la lista de temas (que vive\n"
-            "aparte, pegada por defecto abajo del reproductor). Si la\n"
-            "acercás a cualquier borde del reproductor se encastra ahí\n"
-            "sola (imán) y viaja pegada de ahí en más; se despega\n"
-            "arrastrándola lejos.")
+        self.btn_mostrar_lista = QPushButton(tr("ppal_btn_ocultar_lista"))
+        self.btn_mostrar_lista.setToolTip(tr("ppal_tooltip_mostrar_lista"))
         self.btn_mostrar_lista.clicked.connect(self._alternar_visibilidad_lista)
         fila_botones_lista.addWidget(self.btn_mostrar_lista)
         fila_botones_lista.addStretch()
-        self.chk_modo_mezcla = QCheckBox("Auto")
+        self.chk_modo_mezcla = QCheckBox(tr("ppal_chk_auto"))
         _modo_mezcla_inicial = bool(self.config_data.get("modo_mezcla", True))
         self.chk_modo_mezcla.setChecked(_modo_mezcla_inicial)
-        self.chk_modo_mezcla.setToolTip(
-            "Auto: los temas se mezclan con crossfade al llegar al\n"
-            "recuadro amarillo (modo mezcla automática).\n"
-            "Man: cada tema termina y pasa directo al siguiente,\n"
-            "sin cruce ni recuadro (modo manual).")
+        self.chk_modo_mezcla.setToolTip(tr("ppal_tooltip_modo_mezcla"))
         self.waveform_current.mostrar_zona_mezcla = _modo_mezcla_inicial
         self.waveform_next.mostrar_zona_mezcla = _modo_mezcla_inicial
         self.chk_modo_mezcla.toggled.connect(self.on_modo_mezcla_toggled)
@@ -4587,9 +4567,9 @@ class SmartDJPlayer(QMainWindow):
                 self._posicionar_lista_pegada_abajo()
         if self.config_data.get("lista_visible", True):
             self.lista_separada.show()
-            self.btn_mostrar_lista.setText("📋 Ocultar lista")
+            self.btn_mostrar_lista.setText(tr("ppal_btn_ocultar_lista"))
         else:
-            self.btn_mostrar_lista.setText("📋 Mostrar lista")
+            self.btn_mostrar_lista.setText(tr("ppal_btn_mostrar_lista"))
         self.lista_separada._moviendo_por_iman = False
 
     def _redimensionar_lista_tamano_inicial(self):
@@ -4617,11 +4597,11 @@ class SmartDJPlayer(QMainWindow):
             self._ocultar_lista_separada()
         else:
             self.lista_separada.mostrar_pegada()
-            self.btn_mostrar_lista.setText("📋 Ocultar lista")
+            self.btn_mostrar_lista.setText(tr("ppal_btn_ocultar_lista"))
 
     def _ocultar_lista_separada(self):
         self.lista_separada.hide()
-        self.btn_mostrar_lista.setText("📋 Mostrar lista")
+        self.btn_mostrar_lista.setText(tr("ppal_btn_mostrar_lista"))
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -4766,17 +4746,17 @@ class SmartDJPlayer(QMainWindow):
     def _actualizar_etiquetas_deck(self):
         if 0 <= self.current_index < len(self.playlist):
             nombre_actual = os.path.basename(self.playlist[self.current_index].ruta)
-            self.lbl_deck_a.setText(f"Deck A: {nombre_actual}")
-            self.lbl_track.setText(f"Pista actual: {nombre_actual}")
+            self.lbl_deck_a.setText(f"{tr('ppal_deck_a_nombre')}: {nombre_actual}")
+            self.lbl_track.setText(f"{tr('ppal_pista_actual_prefijo')}: {nombre_actual}")
         else:
-            self.lbl_deck_a.setText("Deck A: (sin tema)")
-            self.lbl_track.setText("Pista actual: Ninguna")
+            self.lbl_deck_a.setText(tr("ppal_deck_a_vacio"))
+            self.lbl_track.setText(f"{tr('ppal_pista_actual_prefijo')}: {tr('ppal_pista_actual_ninguna')}")
         hay_siguiente = 0 <= self.next_index < len(self.playlist)
         if hay_siguiente:
             nombre_siguiente = os.path.basename(self.playlist[self.next_index].ruta)
-            self.lbl_deck_b.setText(f"Deck B: {nombre_siguiente}")
+            self.lbl_deck_b.setText(f"{tr('ppal_deck_b_nombre')}: {nombre_siguiente}")
         else:
-            self.lbl_deck_b.setText("Deck B: (sin tema en espera)")
+            self.lbl_deck_b.setText(tr("ppal_deck_b_vacio"))
         # Si es el último tema de la lista (no hay próxima pista con la
         # que mezclar), sacamos el recuadro amarillo aunque el modo
         # automático esté tildado: no tiene sentido mostrarlo si no va a
@@ -4866,8 +4846,7 @@ class SmartDJPlayer(QMainWindow):
         self.config_data["fraccion_recuadro_a"] = fraccion
         guardar_config_app(self.config_data)
         self.update_status(
-            f"Punto de enganche movido al {fraccion * 100:.0f}% del tema. "
-            f"Se guardará para los próximos temas.")
+            tr("ppal_status_punto_enganche").format(pct=f"{fraccion * 100:.0f}"))
 
     def on_punto_entrada_b_movido(self, offset_segundos):
         if not (0 <= self.next_index < len(self.playlist)):
@@ -4876,7 +4855,7 @@ class SmartDJPlayer(QMainWindow):
         self.engine.offset_entrada_b_forzado = max(0.0, float(offset_segundos))
         self.engine.ruta_offset_entrada_b_forzado = ruta_b
         self.update_status(
-            f"📍 Punto de entrada de B movido a mano ({offset_segundos:.1f}s). Reprocesando...")
+            tr("ppal_status_punto_entrada_b").format(seg=f"{offset_segundos:.1f}"))
         self._reprocesar_b_debounced()
 
     def _tiempo_mezcla(self) -> float:
@@ -5045,15 +5024,15 @@ class SmartDJPlayer(QMainWindow):
         if self.lista_separada is not None:
             self.lista_separada.set_estado_boton_aleatorio(self.modo_aleatorio_activo)
         self.update_status(
-            "🔀 Modo aleatorio activado." if self.modo_aleatorio_activo
-            else "☰ Modo aleatorio desactivado, la lista vuelve a su orden normal.")
+            tr("ppal_status_aleatorio_on") if self.modo_aleatorio_activo
+            else tr("ppal_status_aleatorio_off"))
 
     def on_modo_carga_changed(self, index):
         self.config_data["modo_carga_duplicados"] = "sin_duplicados" if index == 1 else "todos"
         guardar_config_app(self.config_data)
 
     def update_status(self, text):
-        self.lbl_status.setText(f"Estado: {text}")
+        self.lbl_status.setText(f"{tr('ppal_estado_prefijo')}: {text}")
 
     def update_play_progress(self):
         if self.is_playing:
@@ -5221,7 +5200,7 @@ class SmartDJPlayer(QMainWindow):
                 if f.lower().endswith(EXTENSIONES_AUDIO_SOPORTADAS):
                     files.append(os.path.join(root, f))
         if not files:
-            self.update_status(f"No se encontraron audios en {folder_path}")
+            self.update_status(tr("ppal_status_no_audios").format(carpeta=folder_path))
             return
         self.settings.setValue("last_folder", folder_path)
         self.agregar_archivos_a_playlist(
@@ -5243,7 +5222,7 @@ class SmartDJPlayer(QMainWindow):
             pistas.append(self._crear_pista(ruta, indice_inicial + i))
             if (i + 1) % 15 == 0 or (i + 1) == total:
                 self._mostrar_overlay_espera(
-                    f"⏳ Cargando temas, esperá un momento... ({i + 1}/{total})")
+                    tr("ppal_overlay_cargando_temas").format(actual=i + 1, total=total))
         return pistas
 
     def _mostrar_overlay_espera(self, mensaje):
@@ -5276,8 +5255,7 @@ class SmartDJPlayer(QMainWindow):
 
     def _actualizar_banner_fondo(self):
         if self._orden_en_curso:
-            self.banner_fondo.lbl_mensaje.setText(
-                "🎧 Ordenando por tono en segundo plano...")
+            self.banner_fondo.lbl_mensaje.setText(tr("ppal_banner_ordenando_tono"))
             return
         pendientes = sum(
             1 for p in self.playlist if p.estado_analisis in ("pendiente", "analizando"))
@@ -5285,7 +5263,7 @@ class SmartDJPlayer(QMainWindow):
             total = len(self.playlist)
             listos = max(0, total - pendientes)
             self.banner_fondo.lbl_mensaje.setText(
-                f"🎧 Analizando temas en segundo plano... ({listos}/{total})")
+                tr("ppal_banner_analizando_progreso").format(listos=listos, total=total))
             return
         self._ocultar_banner_fondo()
 
@@ -5474,7 +5452,7 @@ class SmartDJPlayer(QMainWindow):
             self.lista_separada.refrescar_bordes()
 
     def _cargar_rutas_en_playlist(self, rutas, mensaje_estado):
-        self._mostrar_overlay_espera(f"⏳ Cargando temas, esperá un momento... (0/{len(rutas)})")
+        self._mostrar_overlay_espera(tr("ppal_overlay_cargando_temas").format(actual=0, total=len(rutas)))
         self.playlist = self._crear_pistas_con_progreso(rutas)
         # Recuperamos a qué carpeta pertenecía cada tema (guardado por
         # ruta, ver _guardar_estado_lista) y reconstruimos los grupos --
@@ -5511,7 +5489,7 @@ class SmartDJPlayer(QMainWindow):
         self._ocultar_overlay_espera()
         self.analizador_fondo.encolar_lista(self.playlist, prioridad_primera=self.current_index)
         self._guardar_estado_lista()
-        self._mostrar_banner_fondo("🎧 Analizando temas en segundo plano...")
+        self._mostrar_banner_fondo(tr("ppal_banner_analizando_fondo"))
 
     def _duracion_rapida(self, ruta):
         try:
@@ -5628,7 +5606,7 @@ class SmartDJPlayer(QMainWindow):
         self._guardar_estado_lista()
         self.update_playlist_colors()
         self._recalcular_next_index_tras_saltear()
-        verbo = "Se va a saltear" if valor else "Se vuelve a reproducir"
+        verbo = tr("ppal_status_saltear_on") if valor else tr("ppal_status_saltear_off")
         self.update_status(f"{'⛔' if valor else '▶'} {verbo}: {pista.nombre}")
 
     def _recalcular_next_index_tras_saltear(self):
@@ -5654,17 +5632,16 @@ class SmartDJPlayer(QMainWindow):
             return
         duplicados_omitidos = 0
         if self.config_data.get("modo_carga_duplicados", "todos") == "sin_duplicados":
-            self._mostrar_overlay_espera("🔎 Buscando duplicados...")
+            self._mostrar_overlay_espera(tr("ppal_overlay_buscando_duplicados"))
             nuevas_rutas, duplicados_omitidos = self._filtrar_rutas_sin_duplicar(nuevas_rutas)
             if not nuevas_rutas:
                 self._ocultar_overlay_espera()
                 self.update_status(
-                    f"No se agregó nada nuevo: {duplicados_omitidos} tema(s) ya estaban "
-                    "en la lista o eran duplicados entre sí.")
+                    tr("ppal_status_nada_nuevo").format(n=duplicados_omitidos))
                 return
         lista_estaba_vacia = not self.playlist
         indice_inicial = len(self.playlist)
-        self._mostrar_overlay_espera(f"⏳ Cargando temas, esperá un momento... (0/{len(nuevas_rutas)})")
+        self._mostrar_overlay_espera(tr("ppal_overlay_cargando_temas").format(actual=0, total=len(nuevas_rutas)))
         nuevas_pistas = self._crear_pistas_con_progreso(nuevas_rutas, indice_inicial)
 
         clave_grupo_fusion = None
@@ -5741,9 +5718,8 @@ class SmartDJPlayer(QMainWindow):
         self._pedir_orden_automatico()
         if duplicados_omitidos:
             self.update_status(
-                f"Se agregaron {len(nuevas_pistas)} tema(s) nuevo(s) "
-                f"({duplicados_omitidos} duplicado(s) omitido(s)).")
-        self._mostrar_banner_fondo("🎧 Analizando temas en segundo plano...")
+                tr("ppal_status_agregados").format(n=len(nuevas_pistas), dup=duplicados_omitidos))
+        self._mostrar_banner_fondo(tr("ppal_banner_analizando_fondo"))
 
     def agregar_grupos_a_playlist(self, grupos):
         """Recibe una lista de (carpeta_path, nombre_carpeta, [archivos])
@@ -5924,7 +5900,7 @@ class SmartDJPlayer(QMainWindow):
         if not self.playlist:
             return
         self.orden_automatico_activo = True
-        self._reordenar_en_fondo_tono("🎧 Ordenando por tono en segundo plano...")
+        self._reordenar_en_fondo_tono(tr("ppal_status_ordenando_tono_fondo"))
 
     def on_checkbox_ordenar_toggled(self, checked):
         self.chk_ordenar_por_tono.setText("Tono" if checked else "BPM")
@@ -5945,7 +5921,7 @@ class SmartDJPlayer(QMainWindow):
         if not self.playlist:
             return
         if self.chk_ordenar_por_tono.isChecked():
-            self._reordenar_en_fondo_tono("🎧 Ordenando por tono en segundo plano...")
+            self._reordenar_en_fondo_tono(tr("ppal_status_ordenando_tono_fondo"))
         else:
             nuevo_orden = _agrupar_y_ordenar(
                 self.playlist, self._carpeta_de_pista, ordenar_por_bpm_ascendente)
@@ -6010,30 +5986,28 @@ class SmartDJPlayer(QMainWindow):
         self._guardar_estado_lista()
         if self.orden_automatico_activo:
             self.orden_automatico_activo = False
-            self.update_status(
-                "✋ Moviste un tema a mano. Orden automático desactivado "
-                "(usá 🔀 Reordenar auto para volver a activarlo).")
+            self.update_status(tr("ppal_status_orden_auto_desactivado"))
         else:
-            self.update_status("✋ Orden manual actualizado.")
+            self.update_status(tr("ppal_status_orden_manual_actualizado"))
 
     def reactivar_orden_automatico(self):
         if not self.playlist:
-            self.update_status("No hay temas en la lista para ordenar.")
+            self.update_status(tr("ppal_status_lista_vacia_ordenar"))
             return
         self.orden_automatico_activo = True
         if self.chk_ordenar_por_tono.isChecked():
             self.ordenar_por_tono()
-            self.update_status("🔀 Orden automático reactivado (por Tono).")
+            self.update_status(tr("ppal_status_orden_auto_tono"))
         else:
             self.ordenar_por_bpm()
-            self.update_status("🔀 Orden automático reactivado (por BPM).")
+            self.update_status(tr("ppal_status_orden_auto_bpm"))
 
     def limpiar_lista_completa(self):
         if not self.playlist:
             return
         respuesta = QMessageBox.question(
-            self, "Limpiar lista completa",
-            f"¿Eliminar todos los {len(self.playlist)} temas?",
+            self, tr("ppal_msgbox_limpiar_titulo"),
+            tr("ppal_msgbox_limpiar_texto").format(n=len(self.playlist)),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if respuesta == QMessageBox.Yes:
             self.stop_audio()
@@ -6051,7 +6025,7 @@ class SmartDJPlayer(QMainWindow):
             self.settings.remove("last_folder")
             self.update_playlist_colors()
             self._guardar_estado_lista()
-            self.update_status("Lista vacía.")
+            self.update_status(tr("ppal_status_lista_vacia"))
 
     def _guardar_estado_reproduccion_actual(self):
         """Guarda qué tema quedó cargado en la bandeja A y en qué segundo,
@@ -6175,8 +6149,8 @@ class SmartDJPlayer(QMainWindow):
             return
         if indice == self.current_index:
             self.list_widget.detener_cadena_borrado()
-            QMessageBox.information(self, "No se puede eliminar",
-                                    "Esa pista está sonando ahora mismo.")
+            QMessageBox.information(self, tr("ppal_msgbox_no_eliminar_titulo"),
+                                    tr("ppal_msgbox_no_eliminar_sonando"))
             return
         era_la_siguiente = (indice == self.next_index)
         pista_eliminada = self.playlist[indice]
@@ -6228,8 +6202,8 @@ class SmartDJPlayer(QMainWindow):
                 id(self.playlist[self.current_index]) in ids_grupo:
             self.list_widget.detener_cadena_borrado()
             QMessageBox.information(
-                self, "No se puede eliminar",
-                "Uno de los temas de esa carpeta está sonando ahora mismo.")
+                self, tr("ppal_msgbox_no_eliminar_titulo"),
+                tr("ppal_msgbox_no_eliminar_carpeta_sonando"))
             return
         cantidad = len(pistas_grupo)
         nombre_grupo = self._info_grupo.get(clave_grupo, {}).get("nombre", "esa carpeta")
@@ -6248,7 +6222,7 @@ class SmartDJPlayer(QMainWindow):
         self._reordenar_lista(nuevo_orden)
         self._pedir_orden_automatico()
         self._seleccionar_fila(fila_separador)
-        self.update_status(f"🗑️ Se eliminaron {cantidad} temas de \"{nombre_grupo}\".")
+        self.update_status(tr("ppal_status_temas_eliminados").format(n=cantidad, grupo=nombre_grupo))
 
     def _seleccionar_fila(self, fila):
         total = self.list_widget.count()
@@ -6367,8 +6341,7 @@ class SmartDJPlayer(QMainWindow):
                 self.timer.start()
                 self.btn_play.setText("⏸")
                 self.update_status(
-                    f"▶ Tema recordado de la sesión anterior, reanudado en "
-                    f"{posicion:.0f}s.")
+                    tr("ppal_status_tema_reanudado").format(seg=f"{posicion:.0f}"))
             else:
                 pygame.mixer.pause()
                 self.engine.set_paused(True)
@@ -6379,8 +6352,7 @@ class SmartDJPlayer(QMainWindow):
                 self.timer.stop()
                 self.btn_play.setText("▶")
                 self.update_status(
-                    f"▶ Tema recordado de la sesión anterior, cargado en "
-                    f"{posicion:.0f}s (pausado, tocá ▶ para seguir).")
+                    tr("ppal_status_tema_cargado_pausado").format(seg=f"{posicion:.0f}"))
             # Refleja la posición restaurada en la barra de progreso ya
             # mismo, en vez de esperar al próximo tick del timer (que si
             # queda pausado, no va a llegar) -- si no, la onda se ve
@@ -6446,7 +6418,7 @@ class SmartDJPlayer(QMainWindow):
             if self.current_index < 0:
                 primer_reproducible = self._primer_indice_reproducible()
                 if primer_reproducible == -1:
-                    self.update_status("⛔ Todos los temas de la lista están marcados para saltear.")
+                    self.update_status(tr("ppal_status_todos_saltear"))
                     return
                 self.current_index = primer_reproducible
             self.next_index = self._siguiente_indice_reproducible(self.current_index)
@@ -6491,7 +6463,7 @@ class SmartDJPlayer(QMainWindow):
                 self.btn_play.setText("▶")
         except Exception as e:
             _traceback_modulo.print_exc()
-            self.update_status(f"❌ Error al reproducir: {e}")
+            self.update_status(tr("ppal_status_error_reproducir").format(err=e))
 
     def stop_audio(self):
         # Si todavía estaba pendiente la restauración automática de la
@@ -6523,9 +6495,7 @@ class SmartDJPlayer(QMainWindow):
             self.is_playing = False
             self.timer.stop()
             self.btn_play.setText("▶")
-            self.update_status(
-                "⏹ Detenido (pausado). Presioná Detener de nuevo para sacar "
-                "los temas de las bandejas y volver al principio de la lista.")
+            self.update_status(tr("ppal_status_detenido_pausado"))
             return
         if self.engine._phase_stream is not None:
             try:
@@ -6609,8 +6579,7 @@ class SmartDJPlayer(QMainWindow):
         if nuevo_borde_izq is not None:
             self.waveform_current.mix_start_seconds = nuevo_borde_izq
             self.waveform_current.update()
-            self.update_status(
-                "⏭ Mezcla adelantada a la próxima frase: mezclará en cuanto llegue ahí.")
+            self.update_status(tr("ppal_status_mezcla_adelantada_sig"))
             return
         self._mezcla_pendiente_objetivo = "siguiente"
         self._mezcla_disparada = True
@@ -6630,8 +6599,7 @@ class SmartDJPlayer(QMainWindow):
             self.waveform_current.mix_start_seconds = nuevo_borde_izq
             self.waveform_current.update()
             self._mezcla_pendiente_objetivo = "anterior"
-            self.update_status(
-                "⏮ Mezcla anterior adelantada a la próxima frase: mezclará en cuanto llegue ahí.")
+            self.update_status(tr("ppal_status_mezcla_adelantada_ant"))
             return
         self._mezcla_pendiente_objetivo = "anterior"
         self._mezcla_disparada = True
@@ -6748,7 +6716,7 @@ def lanzar_app(config_data: dict) -> None:
         except Exception:
             pass
         try:
-            player.update_status(f"❌ Error inesperado: {exc_value}")
+            player.update_status(tr("ppal_status_error_inesperado").format(err=exc_value))
         except Exception:
             pass
 

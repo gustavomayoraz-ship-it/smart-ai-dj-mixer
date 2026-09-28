@@ -29,6 +29,7 @@ from dj_player_Mixer import (
     aplicar_estilo_global,
     guardar_config_app,
 )
+from idiomas import tr, IDIOMAS_DISPONIBLES, IDIOMA_POR_DEFECTO, establecer_idioma, idioma_actual
 
 
 # ================================================================
@@ -291,34 +292,39 @@ class SelectorFlechas(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
+        # Los botones de flecha van con tamaño FIJO (no "Expanding") --
+        # así, cuando esta fila se estira para ocupar todo el ancho del
+        # panel, quien crece es el valor del medio (lbl_valor, que sí es
+        # "Expanding") y las flechas quedan siempre pegaditas a él, en
+        # vez de separarse dejando huecos vacíos a los costados.
         self.btn_menos = QPushButton("◄")
         self.btn_menos.setObjectName("btnFlechaSelector")
-        self.btn_menos.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.btn_menos.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_menos.setAutoRepeat(True)
         self.btn_menos.setAutoRepeatDelay(400)
         self.btn_menos.setAutoRepeatInterval(70)
-        self.btn_menos.setMinimumWidth(34)
-        self.btn_menos.setMinimumHeight(26)
+        self.btn_menos.setFixedWidth(34)
+        self.btn_menos.setFixedHeight(26)
         self.btn_menos.clicked.connect(lambda: self._sumar(-self._paso))
 
         self.lbl_valor = QLabel()
         self.lbl_valor.setAlignment(Qt.AlignCenter)
         self.lbl_valor.setMinimumWidth(56)
+        self.lbl_valor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.btn_mas = QPushButton("►")
         self.btn_mas.setObjectName("btnFlechaSelector")
-        self.btn_mas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.btn_mas.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_mas.setAutoRepeat(True)
         self.btn_mas.setAutoRepeatDelay(400)
         self.btn_mas.setAutoRepeatInterval(70)
-        self.btn_mas.setMinimumWidth(34)
-        self.btn_mas.setMinimumHeight(26)
+        self.btn_mas.setFixedWidth(34)
+        self.btn_mas.setFixedHeight(26)
         self.btn_mas.clicked.connect(lambda: self._sumar(self._paso))
 
         lay.addWidget(self.btn_menos)
         lay.addWidget(self.lbl_valor)
         lay.addWidget(self.btn_mas)
-        lay.addStretch()
 
         self._refrescar()
 
@@ -576,7 +582,16 @@ class ConfiguracionTeclasDialog(QDialog):
         # guardar para pisar ese mismo archivo en vez de crear uno nuevo
         # al lado (ver _cargar_skin_en_editor / _guardar_skin_borrador).
         self._archivo_skin_editando = None
-        self.setWindowTitle("⚙ Ajustes - Smart AI DJ Mixer")
+        # Idioma: se fija (por las dudas) desde la config guardada, y se
+        # arma acá la lista de widgets traducibles de este diálogo -- cada
+        # _grupo_XXX se anota solo al construirse (ver _registrar_i18n) para
+        # que _retranslar_ajustes() los pueda repintar todos de una, sin
+        # tener que reconstruir la ventana, cuando se cambia el idioma
+        # desde el combo de "🌐 Idioma".
+        establecer_idioma(self.player.config_data.get("idioma", IDIOMA_POR_DEFECTO))
+        self._i18n_grupos = []   # [(QGroupBox, clave), ...]
+        self._i18n_botones = []  # [(QPushButton, clave), ...]
+        self.setWindowTitle(tr("ajustes_titulo_ventana"))
         # El tamaño se calcula una única vez, al final de este __init__,
         # una vez armado todo el contenido, y queda FIJO para siempre
         # (ver _fijar_tamano_ventana_una_vez).
@@ -628,9 +643,10 @@ class ConfiguracionTeclasDialog(QDialog):
             self._grupo_restaurar_ventana()), 1, 2)
 
         # Fila de abajo: Cerrar en la esquina izquierda, Historial en la
-        # derecha, con un hueco en el medio (no se pone nada en la
-        # columna 1) en vez de los 3 pegados uno al lado del otro.
+        # derecha, y el selector de Idioma en el hueco del medio que
+        # antes quedaba vacío.
         grid.addWidget(self._grupo_cerrar(), 2, 0)
+        grid.addWidget(self._grupo_idioma(), 2, 1)
         grid.addWidget(self._grupo_historial(), 2, 2)
 
         raiz.addLayout(grid)
@@ -670,6 +686,73 @@ class ConfiguracionTeclasDialog(QDialog):
         super().closeEvent(event)
 
     # ============================================================
+    #  Idioma
+    # ============================================================
+    def _registrar_i18n(self, widget, clave, es_boton=False):
+        """Anota `widget` (un QGroupBox o QPushButton) junto con su
+        clave de traducción, para que _retranslar_ajustes() lo pueda
+        repintar en el idioma nuevo sin reconstruir la ventana."""
+        (self._i18n_botones if es_boton else self._i18n_grupos).append((widget, clave))
+        return widget
+
+    def _grupo_idioma(self):
+        grupo = QGroupBox(tr("ajustes_idioma_titulo"))
+        grupo.setToolTip("Cambia el idioma de esta ventana de Ajustes.")
+        self._registrar_i18n(grupo, "ajustes_idioma_titulo")
+        v = QVBoxLayout(grupo)
+        v.setSpacing(4)
+
+        fila = QHBoxLayout()
+        fila.setSpacing(4)
+        self._lbl_idioma = QLabel(tr("ajustes_idioma_etiqueta"))
+        fila.addWidget(self._lbl_idioma)
+        self.combo_idioma = _ComboBoxSinRueda()
+        self.combo_idioma.addItems(list(IDIOMAS_DISPONIBLES.values()))
+        idioma_guardado = self.player.config_data.get("idioma", IDIOMA_POR_DEFECTO)
+        nombre_guardado = IDIOMAS_DISPONIBLES.get(idioma_guardado, IDIOMAS_DISPONIBLES[IDIOMA_POR_DEFECTO])
+        self.combo_idioma.setCurrentText(nombre_guardado)
+        fila.addWidget(self.combo_idioma, 1)
+        v.addLayout(fila)
+
+        self._lbl_idioma_nota = QLabel(tr("ajustes_idioma_nota"))
+        self._lbl_idioma_nota.setStyleSheet("color: #9aa0a6; font-size: 8pt;")
+        self._lbl_idioma_nota.setWordWrap(True)
+        v.addWidget(self._lbl_idioma_nota)
+
+        v.addStretch()
+
+        self.combo_idioma.currentTextChanged.connect(self._cambiar_idioma)
+        return grupo
+
+    def _cambiar_idioma(self, nombre_visible):
+        codigo = next((c for c, n in IDIOMAS_DISPONIBLES.items() if n == nombre_visible), None)
+        if codigo is None:
+            return
+        self.player.config_data["idioma"] = codigo
+        guardar_config_app(self.player.config_data)
+        establecer_idioma(codigo)
+        self._retranslar_ajustes()
+        self.lbl_confirmacion.setText(f"✅ {nombre_visible}")
+        QTimer.singleShot(1500, lambda: self.lbl_confirmacion.setText(""))
+
+    def _retranslar_ajustes(self):
+        """Repinta, en el idioma recién elegido, todo lo que se anotó
+        con _registrar_i18n -- por ahora los títulos de los grupos y
+        algunos botones de esta ventana de Ajustes. El resto de los
+        textos (etiquetas sueltas, tooltips, la ventana principal y la
+        lista de temas) todavía quedan en español -- se van a ir
+        sumando acá a medida que se traduzca el resto del programa."""
+        self.setWindowTitle(tr("ajustes_titulo_ventana"))
+        for widget, clave in self._i18n_grupos:
+            widget.setTitle(tr(clave))
+        for widget, clave in self._i18n_botones:
+            widget.setText(tr(clave))
+        if hasattr(self, "_lbl_idioma"):
+            self._lbl_idioma.setText(tr("ajustes_idioma_etiqueta"))
+        if hasattr(self, "_lbl_idioma_nota"):
+            self._lbl_idioma_nota.setText(tr("ajustes_idioma_nota"))
+
+    # ============================================================
     #  Grupos
     # ============================================================
     def _pila_grupos(self, *grupos):
@@ -685,13 +768,13 @@ class ConfiguracionTeclasDialog(QDialog):
         return contenedor
 
     def _grupo_teclas(self):
-        grupo = QGroupBox("🎹 Teclas de mezcla")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_teclas_titulo")), "ajustes_teclas_titulo")
         grupo.setToolTip("Asigná teclas de función (F1 a F12) para disparar mezclas sin usar el mouse.")
         g = QGridLayout(grupo)
         g.setHorizontalSpacing(8)
         g.setVerticalSpacing(4)
 
-        lbl_ant = QLabel("Anterior:")
+        lbl_ant = QLabel(tr("ajustes_lbl_anterior"))
         lbl_ant.setToolTip("Tecla que dispara 'Mezclar Anterior'.")
         self.combo_anterior = _ComboBoxSinRueda()
         self.combo_anterior.setToolTip("Elegí la tecla de función para 'Mezclar Anterior'.")
@@ -699,7 +782,7 @@ class ConfiguracionTeclasDialog(QDialog):
         self.combo_anterior.setCurrentText(
             self.player.config_data.get("tecla_mezclar_anterior") or "Sin asignar")
 
-        lbl_sig = QLabel("Siguiente:")
+        lbl_sig = QLabel(tr("ajustes_lbl_siguiente"))
         lbl_sig.setToolTip("Tecla que dispara 'Mezclar Siguiente'.")
         self.combo_siguiente = _ComboBoxSinRueda()
         self.combo_siguiente.setToolTip("Elegí la tecla de función para 'Mezclar Siguiente'.")
@@ -718,12 +801,12 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_volumen(self):
-        grupo = QGroupBox("🔊 Volumen")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_volumen_titulo")), "ajustes_volumen_titulo")
         grupo.setToolTip("El normalizador ajusta automáticamente el volumen de cada tema para que suenen parejos.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
-        self.chk_normalizar = QCheckBox("Normalizar automáticamente")
+        self.chk_normalizar = QCheckBox(tr("ajustes_chk_normalizar"))
         self.chk_normalizar.setToolTip(
             "Iguala el volumen percibido entre temas, midiendo su energía (RMS).")
         self.chk_normalizar.setChecked(bool(self.player.config_data.get("normalizar_volumen", DEF_NORMALIZAR_VOLUMEN)))
@@ -731,7 +814,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila = QHBoxLayout()
         fila.setSpacing(4)
-        lbl = QLabel("Nivel:")
+        lbl = QLabel(tr("ajustes_lbl_nivel"))
         lbl.setToolTip(
             "Ganancia objetivo del normalizador, en dB (igual que en AIMP). "
             "0 dB = nivel neutro. Negativo = más flojo, positivo = más "
@@ -754,7 +837,7 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_brillo(self):
-        grupo = QGroupBox("✨ Brillo y golpe")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_brillo_titulo")), "ajustes_brillo_titulo")
         grupo.setToolTip(
             "Refuerzo automático de agudos (brillo) y graves (golpe) para temas apagados de mastering.")
         h = QHBoxLayout(grupo)
@@ -763,7 +846,7 @@ class ConfiguracionTeclasDialog(QDialog):
         col_izq = QVBoxLayout()
         col_izq.setSpacing(4)
 
-        self.chk_brillo_automatico = QCheckBox("Modo automático")
+        self.chk_brillo_automatico = QCheckBox(tr("ajustes_chk_brillo_automatico"))
         self.chk_brillo_automatico.setToolTip(
             "Activado: mide cada tema y decide solo la intensidad.\n"
             "Desactivado: usa el valor manual fijo (40%).")
@@ -772,7 +855,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_b = QHBoxLayout()
         fila_b.setSpacing(4)
-        lbl_b = QLabel("Agudo:")
+        lbl_b = QLabel(tr("ajustes_lbl_agudo"))
         lbl_b.setToolTip("Techo de agudo: si el tema ya mide más que esto, no se refuerza.")
         fila_b.addWidget(lbl_b)
         self.sel_brillo_set = SelectorFlechas(
@@ -785,7 +868,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_g = QHBoxLayout()
         fila_g.setSpacing(4)
-        lbl_g = QLabel("Golpe:")
+        lbl_g = QLabel(tr("ajustes_lbl_golpe"))
         lbl_g.setToolTip("Umbral de golpe: si el tema mide menos que esto, se refuerza su bombo.")
         fila_g.addWidget(lbl_g)
         self.sel_golpe_set = SelectorFlechas(
@@ -819,7 +902,7 @@ class ConfiguracionTeclasDialog(QDialog):
         layout_panel_datos_brillo.setContentsMargins(0, 0, 0, 0)
         layout_panel_datos_brillo.setSpacing(2)
 
-        lbl_encabezado_datos_brillo = QLabel("Actual - mejora")
+        lbl_encabezado_datos_brillo = QLabel(tr("ajustes_lbl_actual_mejora"))
         lbl_encabezado_datos_brillo.setStyleSheet("color: #888888; font-size: 8pt;")
         lbl_encabezado_datos_brillo.setAlignment(Qt.AlignRight)
         lbl_encabezado_datos_brillo.setToolTip(
@@ -850,10 +933,10 @@ class ConfiguracionTeclasDialog(QDialog):
             grid_datos.addWidget(lbl_f, fila, 3)
             return lbl_v, lbl_f
 
-        self.lbl_dato_brillo_med, self.lbl_dato_brillo_fin = _fila_datos(0, "agudo:")
-        self.lbl_dato_golpe_med,  self.lbl_dato_golpe_fin  = _fila_datos(1, "golpe:")
+        self.lbl_dato_brillo_med, self.lbl_dato_brillo_fin = _fila_datos(0, tr("ajustes_lbl_agudo_min"))
+        self.lbl_dato_golpe_med,  self.lbl_dato_golpe_fin  = _fila_datos(1, tr("ajustes_lbl_golpe_min"))
 
-        lbl_int = QLabel("Mejora total:")
+        lbl_int = QLabel(tr("ajustes_lbl_mejora_total"))
         lbl_int.setToolTip(
             "Cuánto se reforzó este tema en total (agudo + golpe juntos),\n"
             "en el último tema precargado.")
@@ -880,7 +963,7 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_cruce(self):
-        grupo = QGroupBox("🎚️ Cruce")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_cruce_titulo")), "ajustes_cruce_titulo")
         grupo.setToolTip("Reparto del volumen entre A y B durante el crossfade, y duración mínima.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
@@ -899,7 +982,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_punto_a = QHBoxLayout()
         fila_punto_a.setSpacing(4)
-        lbl_punto_a = QLabel("A:")
+        lbl_punto_a = QLabel(tr("ajustes_lbl_punto_a"))
         lbl_punto_a.setStyleSheet("color: #e74c3c; font-weight: bold;")
         lbl_punto_a.setToolTip(
             "Desde qué momento del cruce A empieza a bajar (antes se banca\n"
@@ -918,7 +1001,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_punto_b = QHBoxLayout()
         fila_punto_b.setSpacing(4)
-        lbl_punto_b = QLabel("B:")
+        lbl_punto_b = QLabel(tr("ajustes_lbl_punto_b"))
         lbl_punto_b.setStyleSheet("color: #3498db; font-weight: bold;")
         lbl_punto_b.setToolTip(
             "Desde qué momento del cruce B empieza a subir (antes se banca\n"
@@ -956,7 +1039,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_tiempo_mezcla = QHBoxLayout()
         fila_tiempo_mezcla.setSpacing(4)
-        lbl_tiempo_mezcla = QLabel("Tiempo Mezcla:")
+        lbl_tiempo_mezcla = QLabel(tr("ajustes_lbl_tiempo_mezcla"))
         lbl_tiempo_mezcla.setToolTip(
             "Duración objetivo del crossfade entre dos temas, en segundos.\n"
             "Es el techo: si dos temas no son muy compatibles, el cruce se\n"
@@ -973,7 +1056,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_fade = QHBoxLayout()
         fila_fade.setSpacing(4)
-        lbl_fade = QLabel("   Fade mínimo:")
+        lbl_fade = QLabel(tr("ajustes_lbl_fade_minimo"))
         lbl_fade.setToolTip(
             "Duración mínima del cruce cuando dos temas no son compatibles en BPM/tono.")
         fila_fade.addWidget(lbl_fade)
@@ -991,26 +1074,26 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_efectos(self):
-        grupo = QGroupBox("🎛️ Efectos en vivo")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_efectos_titulo")), "ajustes_efectos_titulo")
         grupo.setToolTip(
             "Efectos aplicados al PRÓXIMO tema que entre en la mezcla.\n"
             "Filtro: entra apagado y se va abriendo. Eco: delay que se apaga.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
-        self.chk_efecto_filtro = QCheckBox("🎛 Filtro (entra apagado y se abre)")
+        self.chk_efecto_filtro = QCheckBox(tr("ajustes_chk_filtro"))
         self.chk_efecto_filtro.setToolTip(
             "El próximo tema arranca con un pasabajos que se abre durante el cruce.")
         v.addWidget(self.chk_efecto_filtro)
 
-        self.chk_efecto_eco = QCheckBox("🔉 Eco (delay que se apaga)")
+        self.chk_efecto_eco = QCheckBox(tr("ajustes_chk_eco"))
         self.chk_efecto_eco.setToolTip(
             "El próximo tema arranca con un eco que se va apagando durante el cruce.")
         v.addWidget(self.chk_efecto_eco)
 
         fila = QHBoxLayout()
         fila.setSpacing(4)
-        lbl = QLabel("Intensidad:")
+        lbl = QLabel(tr("ajustes_lbl_intensidad"))
         lbl.setToolTip("Qué tan fuerte se sienten el filtro y el eco cuando están activos.")
         fila.addWidget(lbl)
         self.sld_intensidad_efectos = _SliderSinRueda(Qt.Horizontal)
@@ -1033,14 +1116,14 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_zona(self):
-        grupo = QGroupBox("🎯 Zona de mezcla")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_zona_titulo")), "ajustes_zona_titulo")
         grupo.setToolTip("Dónde se centra el recuadro amarillo de mezcla en Deck B.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
         fila = QHBoxLayout()
         fila.setSpacing(4)
-        lbl = QLabel("Anclaje B:")
+        lbl = QLabel(tr("ajustes_lbl_anclaje_b"))
         lbl.setToolTip(
             "Downbeat: B entra siempre desde el principio.\n"
             "Frase: B entra desde la primera frase musical que encuentre.")
@@ -1053,7 +1136,7 @@ class ConfiguracionTeclasDialog(QDialog):
         fila.addWidget(self.combo_anclaje_zona, 1)
         v.addLayout(fila)
 
-        self.chk_orden_energia = QCheckBox("⚡ Considerar energía en el orden")
+        self.chk_orden_energia = QCheckBox(tr("ajustes_chk_energia_orden"))
         self.chk_orden_energia.setToolTip(
             "Además de BPM y tono, tiene en cuenta la energía (RMS) para encadenar parejo.")
         self.chk_orden_energia.setChecked(bool(self.player.config_data.get("orden_considera_energia", DEF_ORDEN_CONSIDERA_ENERGIA)))
@@ -1066,14 +1149,14 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_orden(self):
-        grupo = QGroupBox("🔀 Orden y carga")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_orden_titulo")), "ajustes_orden_titulo")
         grupo.setToolTip("Cómo se ordena la lista y cómo se comporta al agregar temas nuevos.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
         fila1 = QHBoxLayout()
         fila1.setSpacing(4)
-        lbl1 = QLabel("Ordenar por:")
+        lbl1 = QLabel(tr("ajustes_lbl_ordenar_por"))
         lbl1.setToolTip("BPM: por velocidad. Tono: por compatibilidad Camelot (BPM + tono + energía).")
         fila1.addWidget(lbl1)
         self.combo_orden_lista = _ComboBoxSinRueda()
@@ -1086,7 +1169,7 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila2 = QHBoxLayout()
         fila2.setSpacing(4)
-        lbl2 = QLabel("Al agregar:")
+        lbl2 = QLabel(tr("ajustes_lbl_al_agregar"))
         lbl2.setToolTip("Sin duplicados detecta repetidos aunque el nombre varíe un poco.")
         fila2.addWidget(lbl2)
         self.combo_carga = _ComboBoxSinRueda()
@@ -1102,14 +1185,14 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_estilo(self):
-        grupo = QGroupBox("🎨 Estilo visual")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_estilo_titulo")), "ajustes_estilo_titulo")
         grupo.setToolTip("Elegí un tema visual de la carpeta 'estilos'. Se aplica al instante.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
         fila = QHBoxLayout()
         fila.setSpacing(4)
-        lbl = QLabel("Estilo:")
+        lbl = QLabel(tr("ajustes_lbl_estilo"))
         lbl.setToolTip("Se aplica al instante, sin reiniciar.")
         fila.addWidget(lbl)
         self.combo_estilo = _ComboBoxSinRueda()
@@ -1122,12 +1205,12 @@ class ConfiguracionTeclasDialog(QDialog):
         fila.addWidget(self.combo_estilo, 1)
         v.addLayout(fila)
 
-        btn_abrir = QPushButton("📂 Abrir carpeta de estilos")
+        btn_abrir = self._registrar_i18n(QPushButton(tr("boton_abrir_carpeta_estilos")), "boton_abrir_carpeta_estilos", es_boton=True)
         btn_abrir.setToolTip("Abre la carpeta 'estilos' para agregar o editar .json.")
         btn_abrir.clicked.connect(self._abrir_carpeta_estilos)
         v.addWidget(btn_abrir)
 
-        btn_crear_skin = QPushButton("🎨 Crear skin")
+        btn_crear_skin = self._registrar_i18n(QPushButton(tr("boton_crear_skin")), "boton_crear_skin", es_boton=True)
         btn_crear_skin.setToolTip(
             "Convierte este mismo formulario en un editor: tocá cada\n"
             "cuadrito de color para cambiar esa parte y ver el resultado\n"
@@ -1142,17 +1225,17 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_historial(self):
-        grupo = QGroupBox("📄 Historial")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_historial_titulo")), "ajustes_historial_titulo")
         grupo.setToolTip("Exportar los temas reproducidos en esta sesión e info del programa.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
-        btn_hist = QPushButton("📄 Exportar historial del set")
+        btn_hist = self._registrar_i18n(QPushButton(tr("boton_exportar_historial")), "boton_exportar_historial", es_boton=True)
         btn_hist.setToolTip("Guarda un .txt con los temas reproducidos en esta sesión, con hora.")
         btn_hist.clicked.connect(self._exportar_historial)
         v.addWidget(btn_hist)
 
-        btn_acerca = QPushButton("ℹ️ Acerca de")
+        btn_acerca = self._registrar_i18n(QPushButton(tr("boton_acerca_de")), "boton_acerca_de", es_boton=True)
         btn_acerca.setToolTip("Información sobre el programa y las librerías usadas.")
         btn_acerca.clicked.connect(lambda: AcercaDeDialog(self.player, self).exec())
         v.addWidget(btn_acerca)
@@ -1161,7 +1244,7 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_cerrar(self):
-        grupo = QGroupBox("✔ Cerrar")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_cerrar_titulo")), "ajustes_cerrar_titulo")
         grupo.setToolTip("Cierra esta ventana. Todos los cambios ya quedaron guardados.")
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
@@ -1187,7 +1270,7 @@ class ConfiguracionTeclasDialog(QDialog):
         self.lbl_confirmacion.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         v.addWidget(self.lbl_confirmacion)
 
-        btn_cerrar = QPushButton("Cerrar")
+        btn_cerrar = self._registrar_i18n(QPushButton(tr("boton_cerrar")), "boton_cerrar", es_boton=True)
         btn_cerrar.setToolTip("Cierra esta ventana. Todos los cambios ya quedaron guardados.")
         btn_cerrar.setMinimumHeight(30)
         btn_cerrar.clicked.connect(self._cerrar_dialogo)
@@ -1197,7 +1280,7 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_restaurar_ventana(self):
-        grupo = QGroupBox("↺ Valores por defecto")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_restaurar_titulo")), "ajustes_restaurar_titulo")
         grupo.setToolTip(
             "Vuelve TODOS los parámetros de este formulario de Ajustes\n"
             "(Teclas, Volumen, Brillo y golpe, Cruce, Efectos en\n"
@@ -1206,7 +1289,7 @@ class ConfiguracionTeclasDialog(QDialog):
         v = QVBoxLayout(grupo)
         v.setSpacing(4)
 
-        btn_restaurar_todo = QPushButton("↺ Restaurar todo")
+        btn_restaurar_todo = self._registrar_i18n(QPushButton(tr("boton_restaurar_todo")), "boton_restaurar_todo", es_boton=True)
         btn_restaurar_todo.setToolTip(
             "Vuelve TODOS los parámetros de Ajustes a los valores de\n"
             "fábrica definidos al inicio del archivo.")
@@ -1219,7 +1302,7 @@ class ConfiguracionTeclasDialog(QDialog):
         return grupo
 
     def _grupo_golpe_seco(self):
-        grupo = QGroupBox("🥁 Golpe seco")
+        grupo = self._registrar_i18n(QGroupBox(tr("ajustes_golpe_seco_titulo")), "ajustes_golpe_seco_titulo")
         grupo.setToolTip(
             "El sistema detecta automáticamente cada golpe de bombo real\n"
             "del tema que va entrando (por onset detection en la banda\n"
@@ -1235,7 +1318,7 @@ class ConfiguracionTeclasDialog(QDialog):
         col_izq = QVBoxLayout()
         col_izq.setSpacing(4)
 
-        self.chk_golpe_seco = QCheckBox("Activar golpe seco")
+        self.chk_golpe_seco = QCheckBox(tr("ajustes_chk_golpe_seco_activar"))
         self.chk_golpe_seco.setToolTip(
             "Apagado por defecto. Prendelo para que el próximo tema que\n"
             "entre a la mezcla reciba el pulso, si le hace falta.")
@@ -1245,7 +1328,7 @@ class ConfiguracionTeclasDialog(QDialog):
         # --- Potencia del pulso (lo único que se ajusta) ---
         fila_pot = QHBoxLayout()
         fila_pot.setSpacing(4)
-        lbl_pot = QLabel("Potencia:")
+        lbl_pot = QLabel(tr("ajustes_lbl_potencia"))
         lbl_pot.setToolTip(
             "Cuánto se suma el pulso al tema, en %.\n"
             "· 30%: sutil, rellena apenas.\n"
@@ -1279,7 +1362,7 @@ class ConfiguracionTeclasDialog(QDialog):
         layout_panel_gs.setContentsMargins(0, 0, 0, 0)
         layout_panel_gs.setSpacing(2)
 
-        lbl_encabezado_gs = QLabel("Actual - mejora")
+        lbl_encabezado_gs = QLabel(tr("ajustes_lbl_actual_mejora"))
         lbl_encabezado_gs.setStyleSheet("color: #888888; font-size: 8pt;")
         lbl_encabezado_gs.setAlignment(Qt.AlignRight)
         lbl_encabezado_gs.setToolTip(
@@ -1294,7 +1377,7 @@ class ConfiguracionTeclasDialog(QDialog):
         grid_datos_gs.setHorizontalSpacing(6)
         grid_datos_gs.setVerticalSpacing(2)
 
-        lbl_gs_etiqueta = QLabel("golpe seco:")
+        lbl_gs_etiqueta = QLabel(tr("ajustes_lbl_golpe_seco_min"))
         lbl_gs_etiqueta.setToolTip(lbl_encabezado_gs.toolTip())
         self.lbl_golpe_seco_actual = QLabel("—")
         self.lbl_golpe_seco_actual.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1317,8 +1400,7 @@ class ConfiguracionTeclasDialog(QDialog):
         # por tema, detectando la frecuencia grave real donde pega el
         # bombo de cada tema (ver _detectar_frecuencia_dominante_bombo en
         # Principal.py). Ajustarla tema por tema a mano era inviable.
-        lbl_freq_auto = QLabel(
-            "🎯 Frecuencia del pulso: automática (afinada por tema)")
+        lbl_freq_auto = QLabel(tr("ajustes_lbl_freq_auto"))
         lbl_freq_auto.setStyleSheet("color: #888888; font-style: italic;")
         lbl_freq_auto.setToolTip(
             "Antes había que elegir la frecuencia del pulso a mano y\n"
@@ -1456,25 +1538,23 @@ class ConfiguracionTeclasDialog(QDialog):
         raiz.setContentsMargins(10, 8, 10, 8)
         raiz.setSpacing(7)
 
-        self.lbl_titulo_editor = QLabel("🎨 Editor de skins -- creando una skin nueva")
+        self.lbl_titulo_editor = QLabel(tr("skin_editor_titulo"))
         self.lbl_titulo_editor.setStyleSheet("font-weight: bold; font-size: 11pt;")
         raiz.addWidget(self.lbl_titulo_editor)
 
-        lbl_ayuda = QLabel(
-            "Tocá cada flecha de color para cambiarlo. El resultado se ve "
-            "al instante en toda la app, incluida esta misma ventana.")
+        lbl_ayuda = QLabel(tr("skin_lbl_ayuda"))
         lbl_ayuda.setWordWrap(True)
         raiz.addWidget(lbl_ayuda)
 
         fila_cargar = QHBoxLayout()
         fila_cargar.setSpacing(6)
-        fila_cargar.addWidget(QLabel("Cargar skin guardada:"))
+        fila_cargar.addWidget(QLabel(tr("skin_lbl_cargar_skin")))
         self.combo_cargar_skin = _ComboBoxSinRueda()
         self.combo_cargar_skin.setToolTip(
             "Elegí una skin guardada para seguir editándola -- se carga tal\n"
             "cual quedó guardada. Dejá \"➕ Nueva skin\" para arrancar de\n"
             "cero, desde la paleta por defecto (Pandemic).")
-        self.combo_cargar_skin.addItem("➕ Nueva skin (Pandemic)")
+        self.combo_cargar_skin.addItem(tr("skin_combo_nueva_skin"))
         self.combo_cargar_skin.addItems(list(self._estilos_disponibles.keys()))
         self.combo_cargar_skin.currentIndexChanged.connect(self._cargar_skin_en_editor)
         fila_cargar.addWidget(self.combo_cargar_skin, 1)
@@ -1482,16 +1562,16 @@ class ConfiguracionTeclasDialog(QDialog):
 
         fila_nombre = QHBoxLayout()
         fila_nombre.setSpacing(6)
-        fila_nombre.addWidget(QLabel("Nombre de la skin:"))
+        fila_nombre.addWidget(QLabel(tr("skin_lbl_nombre_skin")))
         self.entry_nombre_skin = QLineEdit()
-        self.entry_nombre_skin.setPlaceholderText("Ej: Mi skin azul")
+        self.entry_nombre_skin.setPlaceholderText(tr("skin_placeholder_nombre"))
         fila_nombre.addWidget(self.entry_nombre_skin, 1)
         raiz.addLayout(fila_nombre)
 
         # --- Dibujo de la lista de temas: cada fila con su color real,
         # y al lado una FLECHA grande del mismo color -- tocando la
         # flecha se cambia el color de esa fila puntual. ---
-        grupo_lista = QGroupBox("Lista de temas -- flecha = qué color cambia")
+        grupo_lista = self._registrar_i18n(QGroupBox(tr("skin_lista_titulo")), "skin_lista_titulo")
         lay_lista_grupo = QVBoxLayout(grupo_lista)
         lay_lista_grupo.setSpacing(3)
 
@@ -1499,12 +1579,12 @@ class ConfiguracionTeclasDialog(QDialog):
         self._demo_lista_contenedor = None
 
         filas_lista_spec = [
-            ("lista_fila_reproduciendo", "lista_fila_reproduciendo_texto", "▶ Reproduciendo"),
-            ("lista_fila_siguiente", "lista_fila_siguiente_texto", "⏭ En espera"),
-            ("lista_fila_seleccionada", "lista_fila_seleccionada_texto", "🖱 Seleccionada (click)"),
-            ("lista_fila_normal_1", "lista_fila_normal_texto", "Tema normal (Par)"),
-            ("lista_fila_normal_2", "lista_fila_normal_texto", "Tema normal (Impar)"),
-            ("lista_fila_saltear", "lista_fila_saltear_texto", "⛔ Saltear"),
+            ("lista_fila_reproduciendo", "lista_fila_reproduciendo_texto", tr("skin_fila_reproduciendo")),
+            ("lista_fila_siguiente", "lista_fila_siguiente_texto", tr("skin_fila_espera")),
+            ("lista_fila_seleccionada", "lista_fila_seleccionada_texto", tr("skin_fila_seleccionada")),
+            ("lista_fila_normal_1", "lista_fila_normal_texto", tr("skin_fila_normal_par")),
+            ("lista_fila_normal_2", "lista_fila_normal_texto", tr("skin_fila_normal_impar")),
+            ("lista_fila_saltear", "lista_fila_saltear_texto", tr("skin_fila_saltear")),
         ]
         for clave_fondo, clave_texto, etiqueta in filas_lista_spec:
             fila_contenedora = QHBoxLayout()
@@ -1528,7 +1608,7 @@ class ConfiguracionTeclasDialog(QDialog):
         self._demo_lista_contenedor.setFixedSize(190, 26)
         lay_fondo_fila = QHBoxLayout(self._demo_lista_contenedor)
         lay_fondo_fila.setContentsMargins(8, 0, 6, 0)
-        lbl_fondo_lista = QLabel("Fondo de la lista")
+        lbl_fondo_lista = QLabel(tr("skin_fondo_lista"))
         lbl_fondo_lista.setStyleSheet("color: #cccccc;")
         lay_fondo_fila.addWidget(lbl_fondo_lista)
         fila_fondo_contenedora.addWidget(self._demo_lista_contenedor)
@@ -1536,9 +1616,7 @@ class ConfiguracionTeclasDialog(QDialog):
         fila_fondo_contenedora.addStretch(1)
         lay_lista_grupo.addLayout(fila_fondo_contenedora)
 
-        lbl_ayuda_lista = QLabel(
-            "Cada flecha es del mismo color que la fila que señala --\n"
-            "tocala para cambiar ese color puntual.")
+        lbl_ayuda_lista = QLabel(tr("skin_lbl_ayuda_lista"))
         lbl_ayuda_lista.setStyleSheet("color: #888888; font-size: 9pt;")
         lay_lista_grupo.addWidget(lbl_ayuda_lista)
 
@@ -1555,17 +1633,17 @@ class ConfiguracionTeclasDialog(QDialog):
         # ("borde_fuerte"). Antes esto NO tenía control en el editor, así
         # que una skin nueva siempre heredaba el gris de Pandemic acá,
         # por más que se le cambiaran los demás colores. ---
-        grupo_bordes = QGroupBox("Bordes -- flecha = qué color cambia")
+        grupo_bordes = self._registrar_i18n(QGroupBox(tr("skin_bordes_titulo")), "skin_bordes_titulo")
         lay_bordes_grupo = QVBoxLayout(grupo_bordes)
         lay_bordes_grupo.setSpacing(3)
 
         fila_borde_fino = QHBoxLayout()
         fila_borde_fino.setSpacing(2)
-        self._demo_borde_boton = QPushButton("Botón")
+        self._demo_borde_boton = QPushButton(tr("skin_demo_boton"))
         self._demo_borde_boton.setEnabled(False)
         self._demo_borde_boton.setFixedSize(80, 26)
         self._demo_borde_combo = _ComboBoxSinRueda()
-        self._demo_borde_combo.addItem("Combo")
+        self._demo_borde_combo.addItem(tr("skin_demo_combo"))
         self._demo_borde_combo.setEnabled(False)
         self._demo_borde_combo.setFixedSize(80, 26)
         fila_borde_fino.addWidget(self._demo_borde_boton)
@@ -1580,16 +1658,13 @@ class ConfiguracionTeclasDialog(QDialog):
         self._demo_borde_grupo.setFixedSize(170, 26)
         lay_demo_borde_grupo = QHBoxLayout(self._demo_borde_grupo)
         lay_demo_borde_grupo.setContentsMargins(8, 0, 6, 0)
-        lay_demo_borde_grupo.addWidget(QLabel("Recuadro / grupo"))
+        lay_demo_borde_grupo.addWidget(QLabel(tr("skin_recuadro_grupo")))
         fila_borde_fuerte.addWidget(self._demo_borde_grupo)
         self._crear_flecha_color(fila_borde_fuerte, "borde_fuerte")
         fila_borde_fuerte.addStretch(1)
         lay_bordes_grupo.addLayout(fila_borde_fuerte)
 
-        lbl_ayuda_bordes = QLabel(
-            "\"Botón/Combo\" es el contorno de botones, combos, campos y\n"
-            "la lista. \"Recuadro/grupo\" es el contorno de los recuadros\n"
-            "de este mismo panel de Ajustes.")
+        lbl_ayuda_bordes = QLabel(tr("skin_lbl_ayuda_bordes"))
         lbl_ayuda_bordes.setStyleSheet("color: #888888; font-size: 9pt;")
         lay_bordes_grupo.addWidget(lbl_ayuda_bordes)
 
@@ -1597,11 +1672,11 @@ class ConfiguracionTeclasDialog(QDialog):
 
         # --- Dibujo del panel de Volumen: mismo mecanismo, flecha del
         # mismo color pegada a cada elemento real. ---
-        grupo_volumen = QGroupBox("Volumen -- flecha = qué color cambia")
+        grupo_volumen = self._registrar_i18n(QGroupBox(tr("skin_volumen_titulo")), "skin_volumen_titulo")
         lay_volumen_grupo = QVBoxLayout(grupo_volumen)
         lay_volumen_grupo.setSpacing(3)
 
-        self._lbl_demo_volumen_titulo = QLabel("Selector")
+        self._lbl_demo_volumen_titulo = QLabel(tr("skin_selector_titulo"))
         fila_titulo = QHBoxLayout()
         fila_titulo.setSpacing(2)
         fila_titulo.addWidget(self._lbl_demo_volumen_titulo)
@@ -1609,7 +1684,7 @@ class ConfiguracionTeclasDialog(QDialog):
         fila_titulo.addStretch(1)
         lay_volumen_grupo.addLayout(fila_titulo)
 
-        self._chk_demo_volumen = QCheckBox("Normalizar automáticamente")
+        self._chk_demo_volumen = QCheckBox(tr("ajustes_chk_normalizar"))
         self._chk_demo_volumen.setChecked(True)
         self._chk_demo_volumen.setEnabled(False)
         fila_chk = QHBoxLayout()
@@ -1625,7 +1700,7 @@ class ConfiguracionTeclasDialog(QDialog):
         lay_c_nivel = QHBoxLayout(contenedor_nivel)
         lay_c_nivel.setContentsMargins(0, 0, 0, 0)
         lay_c_nivel.setSpacing(4)
-        lay_c_nivel.addWidget(QLabel("Nivel:"))
+        lay_c_nivel.addWidget(QLabel(tr("ajustes_lbl_nivel")))
         self._demo_selector_nivel = SelectorFlechas(
             valor=-2, minimo=-24, maximo=24, sufijo=" dB", mostrar_signo=True)
         self._demo_selector_nivel.setEnabled(False)
@@ -1642,7 +1717,7 @@ class ConfiguracionTeclasDialog(QDialog):
         lay_c_intensidad = QHBoxLayout(contenedor_intensidad)
         lay_c_intensidad.setContentsMargins(0, 0, 0, 0)
         lay_c_intensidad.setSpacing(4)
-        lay_c_intensidad.addWidget(QLabel("Intensidad:"))
+        lay_c_intensidad.addWidget(QLabel(tr("ajustes_lbl_intensidad")))
         slider_demo = QSlider(Qt.Horizontal)
         slider_demo.setValue(50)
         slider_demo.setEnabled(False)
@@ -1660,7 +1735,7 @@ class ConfiguracionTeclasDialog(QDialog):
         # arriba de la otra (antes era una fila abajo de todo). ---
         col_botones = QVBoxLayout()
         col_botones.setSpacing(8)
-        btn_guardar = QPushButton("💾 Guardar skin")
+        btn_guardar = QPushButton(tr("skin_btn_guardar"))
         btn_guardar.setToolTip(
             "Si es una skin nueva, la guarda como un archivo .json nuevo en\n"
             "la carpeta 'estilos'. Si la cargaste de la lista de arriba para\n"
@@ -1668,7 +1743,7 @@ class ConfiguracionTeclasDialog(QDialog):
             "dos casos la deja aplicada.")
         btn_guardar.clicked.connect(self._guardar_skin_borrador)
         col_botones.addWidget(btn_guardar)
-        btn_cancelar = QPushButton("✖ Cancelar")
+        btn_cancelar = QPushButton(tr("skin_btn_cancelar"))
         btn_cancelar.setToolTip("Descarta los cambios y vuelve a la skin que estaba puesta.")
         btn_cancelar.clicked.connect(lambda: self._salir_modo_editor_skins(guardar=False))
         col_botones.addWidget(btn_cancelar)

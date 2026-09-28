@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 # grupo "🪟 Ventana"). Es un dict mutable, no constantes sueltas, para que
 # el cambio se vea al toque sin reiniciar el programa.
 from setup.ajustes import PARAMETROS_VENTANA
+from idiomas import tr
 
 # Corrección fina horizontal para que la lista quede alineada exacto
 # contra el borde izquierdo del reproductor cuando se pega "abajo"/
@@ -288,10 +289,7 @@ class FilaTemaWidget(QWidget):
         layout.setContentsMargins(6, 2, 10, 2)
         layout.setSpacing(8)
         self.chk_saltear = QCheckBox()
-        self.chk_saltear.setToolTip(
-            "Saltear este tema: se queda en la lista pero el avance\n"
-            "automático lo salta, como si no estuviera (se lo puede\n"
-            "seguir reproduciendo a mano con doble click).")
+        self.chk_saltear.setToolTip(tr("lista_tooltip_saltear"))
         self.chk_saltear.toggled.connect(self.saltear_cambiado.emit)
         self.lbl_texto = _LabelElidable()
         self.lbl_duracion = QLabel()
@@ -655,7 +653,7 @@ class VentanaListaSeparada(QWidget):
     def __init__(self, player):
         super().__init__(player, Qt.Window)
         self._player = player
-        self.setWindowTitle("🎵 Lista de temas: 0")
+        self.setWindowTitle(tr("lista_ventana_titulo").format(n=0))
         # El alto mínimo de la ventana de la lista queda igualado al alto
         # fijo de la ventana principal (ver Principal._alto_ventana_fijo)
         # para que no se pueda achicar por debajo de eso.
@@ -734,21 +732,17 @@ class VentanaListaSeparada(QWidget):
         """Refleja en el título de la ventana cuántos temas hay cargados
         (p.ej. "🎵 Lista de temas: 275"). La llama el reproductor cada vez
         que la lista cambia (se carga, se agrega, se borra, se reordena)."""
-        self.setWindowTitle(f"🎵 Lista de temas: {cantidad}")
+        self.setWindowTitle(tr("lista_ventana_titulo").format(n=cantidad))
 
     def set_estado_boton_aleatorio(self, activo: bool):
         """Actualiza el ícono/tooltip del botón de modo aleatorio según
         el estado actual (lo llama Principal.toggle_modo_aleatorio)."""
         if activo:
             self.btn_aleatorio.setText("🔀")
-            self.btn_aleatorio.setToolTip(
-                "Modo aleatorio ACTIVADO: los temas se van sorteando sin "
-                "repetir. Click para volver al orden normal de la lista.")
+            self.btn_aleatorio.setToolTip(tr("lista_tooltip_aleatorio_on"))
         else:
             self.btn_aleatorio.setText("☰")
-            self.btn_aleatorio.setToolTip(
-                "Orden normal. Click para activar el modo aleatorio (los "
-                "temas se van sorteando sin repetir hasta agotar la lista).")
+            self.btn_aleatorio.setToolTip(tr("lista_tooltip_aleatorio_off"))
 
     def _filtrar_lista(self, texto):
         """Buscador progresivo tipo AIMP: a medida que se escribe, se

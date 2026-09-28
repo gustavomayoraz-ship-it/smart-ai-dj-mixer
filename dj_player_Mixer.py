@@ -148,6 +148,9 @@ CONFIG_POR_DEFECTO = {
     "lista_lado_pegado": "derecha",
     "lista_pos_x": None,
     "lista_pos_y": None,
+    # Idioma de la interfaz -- "es" (español), "en" (inglés) o "pt"
+    # (portugués). Ver idiomas.py.
+    "idioma": "es",
 }
 
 
@@ -969,6 +972,12 @@ def main():
     raiz = str(CARPETA_BASE)
     if raiz not in sys.path:
         sys.path.insert(0, raiz)
+
+    # Idioma de la interfaz -- se fija ACÁ, antes de armar cualquier
+    # ventana, para que todo lo que se construya de acá en más (Ajustes,
+    # y a futuro el resto de la app) ya nazca en el idioma guardado.
+    from idiomas import establecer_idioma
+    establecer_idioma(config_data.get("idioma", "es"))
 
     from setup.Principal import lanzar_app
     lanzar_app(config_data)
