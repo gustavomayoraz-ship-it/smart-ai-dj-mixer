@@ -88,7 +88,7 @@ DEF_EFECTO_ECO_ACTIVO        = False
 DEF_EFECTOS_INTENSIDAD_PCT   = 50     # %
 
 # --- 🎯 Zona de mezcla ---
-DEF_ANCLAJE_ZONA_B           = "frase"
+DEF_ANCLAJE_ZONA_B           = "downbeat"
 DEF_ORDEN_CONSIDERA_ENERGIA  = False
 
 # --- 🔀 Orden y carga ---
