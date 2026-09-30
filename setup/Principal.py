@@ -2076,6 +2076,15 @@ class WaveformWidget(QWidget):
         self.is_active = False
         self.mostrar_zona_mezcla = True
         self.anclaje_zona_b = "downbeat"
+        # Solo se usa cuando anclaje_zona_b == "downbeat" -- define
+        # únicamente la posición por defecto del recuadro cuando todavía
+        # no se ubicó ninguno para el tema actual: Automático (True) lo
+        # arranca en su extremo (Deck A al fondo/derecha, Deck B al
+        # principio/izquierda); Manual (False) usa la búsqueda de anclaje
+        # habitual (Deck B) o el último punto recordado (Deck A). En
+        # ambos casos el arrastre y el cambio de tema funcionan igual,
+        # nada queda bloqueado. Ver _zona_mezcla_px.
+        self.anclaje_downbeat_automatico = True
         self.offset_visual_seg = 0.0
         self._arrastrando = False
         self._ultimo_seek_emitido = 0.0
@@ -2183,23 +2192,37 @@ class WaveformWidget(QWidget):
         if mix_width <= 0:
             return None
 
+        # Anclaje Downbeat + modo Automático: solo define la posición POR
+        # DEFECTO de cada recuadro cuando todavía no se ubicó ninguno para
+        # el tema actual (A al fondo, B al principio) -- no bloquea nada:
+        # una vez posicionado (a mano o por defecto), el arrastre y el
+        # cambio de tema con los botones de siguiente/anterior funcionan
+        # exactamente igual en Automático que en Manual. Ver el checkbox
+        # "Auto/Man" de la Zona de mezcla en Ajustes.
+        automatico_downbeat = (
+            self.anclaje_zona_b == "downbeat"
+            and self.anclaje_downbeat_automatico)
+
         if self.is_incoming_deck:
             if self.mix_start_seconds_b < 0:
-                punto = self._punto_ancla_b()
-                if punto is not None:
-                    mix_start_seg = punto - (self.fade_duration / 2.0)
-                    if len(self.beat_times) > 0 and self.bpm > 0:
-                        beats = np.asarray(self.beat_times, dtype=float)
-                        fase = int(self.fase_downbeat) % 4
-                        indices_dibujados = np.arange(fase, len(beats), 4)
-                        if indices_dibujados.size > 0:
-                            beats_dibujados = beats[indices_dibujados]
-                            idx_mas_cerca = int(np.argmin(
-                                np.abs(beats_dibujados - mix_start_seg)))
-                            mix_start_seg = float(beats_dibujados[idx_mas_cerca])
-                    self.mix_start_seconds_b = mix_start_seg
-                else:
+                if automatico_downbeat:
                     self.mix_start_seconds_b = 0.0
+                else:
+                    punto = self._punto_ancla_b()
+                    if punto is not None:
+                        mix_start_seg = punto - (self.fade_duration / 2.0)
+                        if len(self.beat_times) > 0 and self.bpm > 0:
+                            beats = np.asarray(self.beat_times, dtype=float)
+                            fase = int(self.fase_downbeat) % 4
+                            indices_dibujados = np.arange(fase, len(beats), 4)
+                            if indices_dibujados.size > 0:
+                                beats_dibujados = beats[indices_dibujados]
+                                idx_mas_cerca = int(np.argmin(
+                                    np.abs(beats_dibujados - mix_start_seg)))
+                                mix_start_seg = float(beats_dibujados[idx_mas_cerca])
+                        self.mix_start_seconds_b = mix_start_seg
+                    else:
+                        self.mix_start_seconds_b = 0.0
             mix_x_start = int((self.mix_start_seconds_b / self.duration) * width)
             mix_x_start = max(0, min(mix_x_start, width - mix_width))
         elif self.mix_start_seconds >= 0:
@@ -2260,12 +2283,19 @@ class WaveformWidget(QWidget):
                 self._movido_a_mano_b = True
                 self.punto_entrada_b_movido.emit(nuevo_borde_izq)
             else:
-                frase_centro = self.frase_mas_cercana(centro_tiempo)
-                nuevo_borde_izq = max(0.0, frase_centro - self.fade_duration / 2.0)
-                nuevo_borde_izq = min(nuevo_borde_izq, self.duration - self.fade_duration)
-                if len(self.downbeat_times) > 0:
-                    nuevo_borde_izq = self.downbeat_mas_cercano(nuevo_borde_izq)
-                    nuevo_borde_izq = max(0.0, min(nuevo_borde_izq, self.duration - self.fade_duration))
+                # El Deck A arrastra distinto según el modo de anclaje
+                # elegido en Ajustes (mismo criterio que ya usa el Deck B
+                # en _snap_entrada_b): en "Frase" salta de frase en frase
+                # (sin el re-enganche a downbeat que había antes, que en
+                # los hechos lo alejaba de la frase real); en "Downbeat"
+                # se mueve suave, sin ningún snap, a cualquier posición.
+                if self.anclaje_zona_b == "frase" and len(self.phrase_boundaries) > 0:
+                    frase_centro = self.frase_mas_cercana(centro_tiempo)
+                    nuevo_borde_izq = max(0.0, frase_centro - self.fade_duration / 2.0)
+                    nuevo_borde_izq = min(nuevo_borde_izq, self.duration - self.fade_duration)
+                else:
+                    nuevo_borde_izq = max(0.0, centro_tiempo - self.fade_duration / 2.0)
+                    nuevo_borde_izq = min(nuevo_borde_izq, self.duration - self.fade_duration)
                 self.mix_start_seconds = nuevo_borde_izq
                 self._movido_a_mano = True
                 self.zona_mezcla_movida.emit(nuevo_borde_izq / self.duration)
@@ -2375,15 +2405,23 @@ class WaveformWidget(QWidget):
             self.update()
 
     def trigger_active_mix_zone(self, start_seconds):
-        if len(self.phrase_boundaries) > 0:
+        # Mismo criterio de modo que ya usan _snap_entrada_b (Deck B) y el
+        # arrastre a mano del Deck A: en "Frase" engancha en la frase más
+        # cercana (sin el re-enganche a downbeat que antes lo alejaba de
+        # esa frase); en "Downbeat" (o si no hay frases detectadas) NO
+        # reengancha a ningún lado -- entra directo donde ya está la línea
+        # blanca en este instante, en vez de saltar para atrás o adelante
+        # a una frase/downbeat que puede haber quedado lejos del recuadro
+        # que el usuario dejó puesto a mano (eso rompía la mezcla: el
+        # recuadro terminaba antes que la posición actual y no llegaba a
+        # dispararse nada).
+        if self.anclaje_zona_b == "frase" and len(self.phrase_boundaries) > 0:
             frase = self.frase_mas_cercana(start_seconds)
             ancho = self.fade_duration if self.fade_duration > 0 else 0.0
             objetivo = max(0.0, frase - ancho / 2.0)
-            if len(self.downbeat_times) > 0:
-                objetivo = self.downbeat_mas_cercano(objetivo)
             self.mix_start_seconds = max(0.0, objetivo)
         else:
-            self.mix_start_seconds = self.downbeat_siguiente(start_seconds)
+            self.mix_start_seconds = max(0.0, start_seconds)
         self.update()
 
     def clear(self):
@@ -4374,6 +4412,17 @@ class SmartDJPlayer(QMainWindow):
         main_layout.setSpacing(4)
         self.lbl_deck_a = QLabel(tr("ppal_deck_a_vacio"))
         self.waveform_current = WaveformWidget(title=tr("ppal_deck_a_nombre"), is_incoming_deck=False)
+        # El Deck A también tiene que enterarse del modo de anclaje elegido
+        # en Ajustes (Downbeat/Frase) -- antes solo se lo pasábamos al Deck
+        # B (waveform_next) y el A se quedaba siempre con el valor por
+        # defecto de la clase ("downbeat"), sin importar lo que estuviera
+        # tildado. Ver también _cambiar_anclaje_zona en ajustes.py, donde
+        # se actualiza esto en caliente si el usuario cambia el modo.
+        self.waveform_current.anclaje_zona_b = (
+            "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
+            else "downbeat")
+        self.waveform_current.anclaje_downbeat_automatico = bool(
+            self.config_data.get("anclaje_downbeat_automatico", True))
         self.waveform_current.seek_requested.connect(self.on_waveform_seek)
         self.waveform_current.zona_mezcla_movida.connect(self.on_zona_mezcla_movida)
         grupo_deck_a = QVBoxLayout()
@@ -4387,6 +4436,8 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_next.anclaje_zona_b = (
             "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
             else "downbeat")
+        self.waveform_next.anclaje_downbeat_automatico = bool(
+            self.config_data.get("anclaje_downbeat_automatico", True))
         self.waveform_next.punto_entrada_b_movido.connect(self.on_punto_entrada_b_movido)
         self.waveform_next.setToolTip(tr("ppal_tooltip_waveform_next"))
         grupo_deck_b = QVBoxLayout()
@@ -4887,6 +4938,14 @@ class SmartDJPlayer(QMainWindow):
             return
         if wf._movido_a_mano:
             return
+        # Este reenganche a la frase más cercana es un criterio pura y
+        # exclusivamente de modo "Frase" -- en modo "Downbeat" el recuadro
+        # tiene que quedarse tal cual lo calculó _borde_izq_recuadro_actual
+        # (por defecto, al fondo del tema), sin que esta función lo tire
+        # para atrás hacia una frase en cuanto termina de analizarse cada
+        # tema nuevo.
+        if wf.anclaje_zona_b != "frase":
+            return
         if self.engine.bpm_a <= 0:
             return
         ancho = self._fade_visual_efectivo()
@@ -4967,6 +5026,17 @@ class SmartDJPlayer(QMainWindow):
         self._guardar_config_debounced()
         fade_efectivo = self._fade_visual_efectivo()
         self.waveform_current.fade_duration = fade_efectivo
+        # En Downbeat, si el Deck A todavía no se movió a mano, su
+        # posición por defecto está anclada al FINAL del tema (igual
+        # criterio que ya usa el Deck B con mix_start_seconds_b = -1.0
+        # más abajo): hay que soltar el valor fijo en segundos y dejar
+        # que _zona_mezcla_px lo recalcule dinámicamente en cada pintada,
+        # si no el recuadro queda con el lado IZQUIERDO fijo en vez del
+        # derecho y crece para el lado que no corresponde al mover el
+        # slider de Tiempo de mezcla.
+        if (self.waveform_current.anclaje_zona_b == "downbeat"
+                and not self.waveform_current._movido_a_mano):
+            self.waveform_current.mix_start_seconds = -1.0
         self.waveform_current.update()
         self.waveform_next.fade_duration = fade_efectivo
         self.waveform_next.mix_start_seconds_b = -1.0
@@ -5102,6 +5172,14 @@ class SmartDJPlayer(QMainWindow):
             return 0.0
         if self.waveform_current.mix_start_seconds >= 0:
             return self.waveform_current.mix_start_seconds
+        # En modo Downbeat el recuadro del Deck A arranca directamente al
+        # fondo del tema (el final), sin usar la posición "pegajosa"
+        # (fraccion_enganche) que recuerda dónde lo dejaste la última vez
+        # -- esa memoria es un criterio de "Frase" (mezclar en un punto
+        # musical intermedio), no tiene sentido en Downbeat, donde se
+        # espera que por defecto se mezcle recién al final del tema.
+        if self.waveform_current.anclaje_zona_b != "frase" and self.fraccion_enganche is not None:
+            return max(0.0, duracion - self._fade_visual_efectivo())
         if self.fraccion_enganche is not None:
             return max(0.0, min(duracion, duracion * self.fraccion_enganche))
         return max(0.0, duracion - self._fade_visual_efectivo())

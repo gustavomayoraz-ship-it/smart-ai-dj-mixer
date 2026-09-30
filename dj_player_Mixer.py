@@ -125,6 +125,7 @@ CONFIG_POR_DEFECTO = {
     "modo_mezcla": True,
     "rampa_tempo_seg": 5.0,
     "anclaje_zona_b": "downbeat",
+    "anclaje_downbeat_automatico": True,
     "fraccion_recuadro_a": 0.5,
     "fade_minimo_seg": 5.0,
     "punto_a_cruce": 0.0,
@@ -682,7 +683,11 @@ DEPENDENCIAS = _cargar_lista_dependencias() or [
     ("numpy", "numpy"),
     ("soundfile", "soundfile"),
     ("librosa", "librosa"),
-    ("pygame", "pygame"),
+    # pygame-ce (no "pygame" a secas): fork 100% compatible, se importa
+    # igual ("import pygame"), pero trae instaladores al día con versiones
+    # de Python nuevas -- ver config/dependencias_dj.py, que es la lista
+    # que de verdad se usa; esto es solo el respaldo si ese archivo faltara.
+    ("pygame-ce", "pygame"),
     ("scipy", "scipy"),
     ("sounddevice", "sounddevice"),
     ("audiotsm", "audiotsm"),
@@ -704,25 +709,40 @@ ANCHO_VENTANA = 400
 
 
 def _intentar_instalar(nombre: str):
+    """Devuelve (origen, detalle_error). origen es "offline"/"online" si
+    se pudo instalar, o None si fallaron los dos intentos -- en ese caso
+    detalle_error trae el texto real que devolvió pip (antes se perdía:
+    con --quiet + check_call solo quedaba un "Error" genérico en la
+    interfaz, sin ninguna pista de la causa real: falta de wheel para esa
+    versión de Python, sin internet, firewall/antivirus, certificados
+    SSL, etc.)."""
+    detalle_offline = None
     hay_carpeta_offline = (
         CARPETA_DEPENDENCIAS_OFFLINE.is_dir()
         and any(CARPETA_DEPENDENCIAS_OFFLINE.iterdir()))
     if hay_carpeta_offline:
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--quiet",
-                 "--no-index", "--find-links", str(CARPETA_DEPENDENCIAS_OFFLINE), nombre],
-                creationflags=CREATIONFLAGS)
-            return "offline"
-        except subprocess.CalledProcessError:
-            pass
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet", nombre],
-            creationflags=CREATIONFLAGS)
-        return "online"
-    except subprocess.CalledProcessError:
-        return None
+        resultado = subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "--no-index", "--find-links", str(CARPETA_DEPENDENCIAS_OFFLINE), nombre],
+            capture_output=True, text=True, creationflags=CREATIONFLAGS)
+        if resultado.returncode == 0:
+            return "offline", None
+        detalle_offline = (resultado.stderr or resultado.stdout or "").strip()
+
+    resultado = subprocess.run(
+        [sys.executable, "-m", "pip", "install", nombre],
+        capture_output=True, text=True, creationflags=CREATIONFLAGS)
+    if resultado.returncode == 0:
+        return "online", None
+    detalle_online = (resultado.stderr or resultado.stdout or "").strip()
+    partes = []
+    if detalle_offline:
+        partes.append(
+            "Intento sin internet (carpeta dependencias_offline):\n" + detalle_offline)
+    partes.append(
+        "Intento con internet (pip normal):\n"
+        + (detalle_online or "pip no devolvió ningún detalle del error."))
+    return None, "\n\n".join(partes)
 
 
 class VentanaVerificacion(tk.Tk):
@@ -738,6 +758,7 @@ class VentanaVerificacion(tk.Tk):
 
         self._pending_after_ids = []
         self.labels_estado = {}
+        self._errores = {}
         self._asegurar_carpetas_necesarias()
         self._construir_interfaz()
         self._centrar_ventana()
@@ -768,6 +789,12 @@ class VentanaVerificacion(tk.Tk):
         if widget.winfo_exists():
             widget.config(**kwargs)
 
+    def _mostrar_error_detalle(self, nombre):
+        detalle = self._errores.get(nombre)
+        if not detalle:
+            return
+        messagebox.showerror(f"Error instalando '{nombre}'", detalle)
+
     def _construir_interfaz(self):
         self.geometry(f"{ANCHO_VENTANA}x600")
         contenedor = tk.Frame(self, bg="#f8f9fa", padx=20, pady=15)
@@ -782,8 +809,12 @@ class VentanaVerificacion(tk.Tk):
             tk.Label(fila, text=nombre, font=("Segoe UI", 9, "bold"),
                      bg="#f8f9fa", fg="#2c3e50", width=14, anchor="w").pack(side="left")
             lbl_estado = tk.Label(fila, text="⏳ Pendiente", font=("Segoe UI", 9),
-                                  bg="#f8f9fa", fg="#7f8c8d", anchor="w")
+                                  bg="#f8f9fa", fg="#7f8c8d", anchor="w", cursor="arrow")
             lbl_estado.pack(side="left", fill="x", expand=True)
+            # Si esa dependencia terminó en error, un click en su estado
+            # muestra el texto completo que devolvió pip -- ver
+            # _mostrar_error_detalle.
+            lbl_estado.bind("<Button-1>", lambda e, n=nombre: self._mostrar_error_detalle(n))
             self.labels_estado[nombre] = lbl_estado
         self.progreso = ttk.Progressbar(contenedor, mode="determinate", length=380)
         self.progreso.pack(fill="x", pady=(10, 6))
@@ -791,6 +822,10 @@ class VentanaVerificacion(tk.Tk):
             contenedor, text="🔍 Iniciando verificación...", font=("Segoe UI", 9),
             bg="#f8f9fa", fg="#2c3e50", anchor="w", justify="left", wraplength=360)
         self.lbl_estado_general.pack(fill="x", pady=(0, 4))
+        self.btn_reintentar = tk.Button(
+            contenedor, text="🔄 Reintentar", font=("Segoe UI", 9, "bold"),
+            bg="#2ecc71", fg="white", relief="flat", padx=10, pady=6,
+            command=self._reintentar)
         self.update_idletasks()
         alto = self.winfo_reqheight() + 16
         self.geometry(f"{ANCHO_VENTANA}x{alto}")
@@ -805,6 +840,7 @@ class VentanaVerificacion(tk.Tk):
 
     def _verificar_todo(self):
         total = len(DEPENDENCIAS)
+        hubo_error = False
         for i, (nombre, import_name) in enumerate(DEPENDENCIAS):
             self._programar(0, lambda n=nombre: self._config_seguro(
                 self.lbl_estado_general, text=f"🔍 Verificando {n}..."))
@@ -815,7 +851,7 @@ class VentanaVerificacion(tk.Tk):
             except ImportError:
                 self._programar(0, lambda n=nombre: self._config_seguro(
                     self.labels_estado[n], text="⏳ Instalando...", fg="#e67e22"))
-                origen = _intentar_instalar(nombre)
+                origen, detalle = _intentar_instalar(nombre)
                 if origen == "offline":
                     self._programar(0, lambda n=nombre: self._config_seguro(
                         self.labels_estado[n], text="✅ Instalado (sin internet)", fg="#27ae60"))
@@ -823,18 +859,53 @@ class VentanaVerificacion(tk.Tk):
                     self._programar(0, lambda n=nombre: self._config_seguro(
                         self.labels_estado[n], text="✅ Instalado", fg="#27ae60"))
                 else:
+                    hubo_error = True
+                    self._errores[nombre] = detalle or "pip no devolvió ningún detalle del error."
                     self._programar(0, lambda n=nombre: self._config_seguro(
-                        self.labels_estado[n], text="❌ Error", fg="#e74c3c"))
+                        self.labels_estado[n],
+                        text="❌ Error -- click acá para ver el detalle", fg="#e74c3c"))
             self._programar(0, lambda v=(i + 1) / total * 100: self._config_seguro(self.progreso, value=v))
         self._programar(0, lambda: self._config_seguro(self.progreso, value=100))
-        self._programar(0, lambda: self._config_seguro(
-            self.lbl_estado_general, text="✅ Todo listo, iniciando..."))
-        # Sin botón que confirmar: apenas termina la verificación (todo
-        # instalado, sea porque ya estaba o porque se instaló desde la
-        # carpeta offline / con internet), la ventana se cierra sola y
-        # sigue directo a la aplicación. El breve delay es solo para que
-        # se alcance a leer el "Todo listo" antes de que se cierre.
-        self._programar(500, self._finalizar_y_continuar)
+        if hubo_error:
+            # Si falta instalar algo, NO seguimos para adelante -- antes
+            # esto se ignoraba y la app arrancaba igual, para terminar
+            # crasheando un rato después con un "ModuleNotFoundError" sin
+            # ningún contexto (justo lo que le pasó a Gustavo con numpy en
+            # Python 3.14: acá quedaba "❌ Error" sin más detalle y la
+            # ventana se cerraba sola de todos modos). Ahora se frena acá,
+            # con el motivo real a un click de distancia y un botón para
+            # reintentar después de solucionarlo (conexión, etc.).
+            self._programar(0, lambda: self._config_seguro(
+                self.lbl_estado_general,
+                text="⚠️ Alguna dependencia no se pudo instalar -- hacé click en su "
+                     "estado para ver el motivo exacto, solucionalo y volvé a intentar.",
+                fg="#e74c3c"))
+            self._programar(0, self._mostrar_boton_reintentar)
+        else:
+            self._programar(0, lambda: self._config_seguro(
+                self.lbl_estado_general, text="✅ Todo listo, iniciando...", fg="#2c3e50"))
+            # Sin botón que confirmar: apenas termina la verificación (todo
+            # instalado, sea porque ya estaba o porque se instaló desde la
+            # carpeta offline / con internet), la ventana se cierra sola y
+            # sigue directo a la aplicación. El breve delay es solo para que
+            # se alcance a leer el "Todo listo" antes de que se cierre.
+            self._programar(500, self._finalizar_y_continuar)
+
+    def _mostrar_boton_reintentar(self):
+        if self.btn_reintentar.winfo_exists():
+            self.btn_reintentar.pack(pady=(0, 4))
+            self.update_idletasks()
+            alto = self.winfo_reqheight() + 16
+            self.geometry(f"{ANCHO_VENTANA}x{alto}")
+
+    def _reintentar(self):
+        self.btn_reintentar.pack_forget()
+        self._errores = {}
+        for nombre, _ in DEPENDENCIAS:
+            self._config_seguro(self.labels_estado[nombre], text="⏳ Pendiente", fg="#7f8c8d")
+        self.progreso["value"] = 0
+        self._config_seguro(self.lbl_estado_general, text="🔍 Reintentando...", fg="#2c3e50")
+        threading.Thread(target=self._verificar_todo, daemon=True).start()
 
     def _finalizar_y_continuar(self):
         self.continuar = True

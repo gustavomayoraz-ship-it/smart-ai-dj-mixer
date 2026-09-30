@@ -54,7 +54,11 @@ DEPENDENCIAS = _cargar_lista_dependencias() or [
     ("numpy", "numpy"),
     ("soundfile", "soundfile"),
     ("librosa", "librosa"),
-    ("pygame", "pygame"),
+    # pygame-ce (no "pygame" a secas): fork 100% compatible, se importa
+    # igual ("import pygame"), pero trae instaladores al día con versiones
+    # de Python nuevas -- ver config/dependencias_dj.py, que es la lista
+    # que de verdad se usa; esto es solo el respaldo si ese archivo faltara.
+    ("pygame-ce", "pygame"),
     ("scipy", "scipy"),
     ("sounddevice", "sounddevice"),
     ("audiotsm", "audiotsm"),
@@ -76,6 +80,7 @@ class VentanaDescarga(tk.Tk):
 
         self._pending_after_ids = []
         self.labels_estado = {}
+        self._errores = {}
         self._construir_interfaz()
         self._centrar_ventana()
         self.protocol("WM_DELETE_WINDOW", self._al_cerrar)
@@ -102,6 +107,12 @@ class VentanaDescarga(tk.Tk):
         self._cancelar_pendientes()
         sys.exit(0)
 
+    def _mostrar_error_detalle(self, nombre):
+        detalle = self._errores.get(nombre)
+        if not detalle:
+            return
+        messagebox.showerror(f"Error descargando '{nombre}'", detalle)
+
     # ---------------------------- interfaz ----------------------------
     def _construir_interfaz(self):
         contenedor = tk.Frame(self, bg="#f8f9fa", padx=20, pady=15)
@@ -122,8 +133,13 @@ class VentanaDescarga(tk.Tk):
             tk.Label(fila, text=nombre, font=("Segoe UI", 9, "bold"),
                      bg="#f8f9fa", fg="#2c3e50", width=14, anchor="w").pack(side="left")
             lbl_estado = tk.Label(fila, text="⏳ Pendiente", font=("Segoe UI", 9),
-                                  bg="#f8f9fa", fg="#7f8c8d", anchor="w")
+                                  bg="#f8f9fa", fg="#7f8c8d", anchor="w", cursor="arrow")
             lbl_estado.pack(side="left", fill="x", expand=True)
+            # Si esa dependencia terminó en error, un click en su estado
+            # muestra el texto completo que devolvió pip (antes esto solo
+            # se veía en la consola, y la mayoría de las veces el programa
+            # se abre sin consola visible -- ver _mostrar_error_detalle).
+            lbl_estado.bind("<Button-1>", lambda e, n=nombre: self._mostrar_error_detalle(n))
             self.labels_estado[nombre] = lbl_estado
 
         self.progreso = ttk.Progressbar(contenedor, mode="determinate", length=380)
@@ -197,6 +213,7 @@ class VentanaDescarga(tk.Tk):
             return
         self.descargando = True
         self.btn_descargar.config(state="disabled", bg="#95a5a6")
+        self._errores = {}
         for nombre, _ in DEPENDENCIAS:
             self._config_seguro(self.labels_estado[nombre], text="⏳ Pendiente", fg="#7f8c8d")
         self.progreso["value"] = 0
@@ -226,17 +243,29 @@ class VentanaDescarga(tk.Tk):
                 # paquete (ej. las que necesita librosa por debajo), si no
                 # la instalación offline después se queda a mitad de
                 # camino pidiendo algo que no está en la carpeta.
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "download", "--quiet",
+                # Se captura stdout/stderr (en vez de --quiet + check_call)
+                # porque "revisar conexión" a secas no alcanza para
+                # diagnosticar: puede fallar por no haber wheel para esa
+                # versión de Python, por un firewall/antivirus bloqueando
+                # solo ese paquete, por certificados SSL, etc. -- ahora el
+                # motivo real de pip queda guardado y se puede ver haciendo
+                # click en el estado de esa dependencia.
+                resultado = subprocess.run(
+                    [sys.executable, "-m", "pip", "download",
                      "-d", str(self.carpeta_destino), nombre],
-                    creationflags=CREATIONFLAGS)
+                    capture_output=True, text=True, creationflags=CREATIONFLAGS)
+                if resultado.returncode != 0:
+                    salida = (resultado.stderr or resultado.stdout or "").strip()
+                    self._errores[nombre] = salida or "pip no devolvió ningún detalle del error."
+                    print(f"[descargar_dependencias] Error descargando '{nombre}':\n{salida}")
+                    raise subprocess.CalledProcessError(resultado.returncode, resultado.args)
                 self._programar(0, lambda n=nombre: self._config_seguro(
                     self.labels_estado[n], text="✅ Descargado", fg="#27ae60"))
-            except subprocess.CalledProcessError as e:
+            except subprocess.CalledProcessError:
                 hubo_error = True
                 self._programar(0, lambda n=nombre: self._config_seguro(
-                    self.labels_estado[n], text="❌ Error (revisar conexión)", fg="#e74c3c"))
-                print(f"[descargar_dependencias] Error descargando '{nombre}': {e}")
+                    self.labels_estado[n],
+                    text="❌ Error -- click acá para ver el detalle", fg="#e74c3c"))
             self._programar(0, lambda v=(i + 1) / total * 100: self._config_seguro(self.progreso, value=v))
 
         if hubo_error:

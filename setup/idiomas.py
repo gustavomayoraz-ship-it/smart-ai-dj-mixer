@@ -181,6 +181,7 @@ TEXTOS = {
         "skin_btn_guardar": "💾 Guardar skin",
         "skin_btn_cancelar": "✖ Cancelar",
         "ajustes_lbl_freq_auto": "🎯 Frecuencia del pulso: automática (afinada por tema)",
+        "ajustes_chk_anclaje_auto_man": "Auto/Man",
     },
     "en": {
         "ajustes_titulo_ventana": "⚙ Settings - Smart AI DJ Mixer",
@@ -333,6 +334,7 @@ TEXTOS = {
         "skin_btn_guardar": "💾 Save skin",
         "skin_btn_cancelar": "✖ Cancel",
         "ajustes_lbl_freq_auto": "🎯 Punch frequency: automatic (tuned per track)",
+        "ajustes_chk_anclaje_auto_man": "Auto/Man",
     },
     "pt": {
         "ajustes_titulo_ventana": "⚙ Configurações - Smart AI DJ Mixer",
@@ -485,6 +487,7 @@ TEXTOS = {
         "skin_btn_guardar": "💾 Salvar skin",
         "skin_btn_cancelar": "✖ Cancelar",
         "ajustes_lbl_freq_auto": "🎯 Frequência do impacto: automática (ajustada por faixa)",
+        "ajustes_chk_anclaje_auto_man": "Auto/Man",
     },
 }
 

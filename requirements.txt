@@ -1,5 +1,5 @@
 PySide6
-pygame
+pygame-ce
 librosa
 numpy
 scipy

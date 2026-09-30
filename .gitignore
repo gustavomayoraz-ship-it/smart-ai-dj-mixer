@@ -7,6 +7,11 @@ __pycache__/
 cache/
 logs/
 config/
+# ...salvo dependencias_dj.py: es código (la lista de dependencias que
+# comparten dj_player_Mixer.py y descargar_dependencias_dj.py), no un
+# dato generado por el programa como config_app.json -- sí tiene que
+# subirse a GitHub.
+!config/dependencias_dj.py
 
 # --- Paquetes .whl para instalar sin internet (pesan cientos de MB,
 #     no entran en GitHub -- quien clone el repo los baja con pip) ---

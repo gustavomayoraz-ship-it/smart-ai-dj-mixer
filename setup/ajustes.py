@@ -89,6 +89,12 @@ DEF_EFECTOS_INTENSIDAD_PCT   = 50     # %
 
 # --- 🎯 Zona de mezcla ---
 DEF_ANCLAJE_ZONA_B           = "downbeat"
+# Solo tiene efecto cuando DEF_ANCLAJE_ZONA_B (o lo que el usuario haya
+# elegido) es "downbeat" -- Automático (True): los recuadros se ubican y
+# se pueden arrastrar libremente, como ya funciona. Manual (False): el
+# recuadro del Deck A queda siempre fijo al fondo (el final del tema) y
+# el del Deck B siempre fijo al principio, sin arrastre.
+DEF_ANCLAJE_DOWNBEAT_AUTOMATICO = True
 DEF_ORDEN_CONSIDERA_ENERGIA  = False
 
 # --- 🔀 Orden y carga ---
@@ -1136,6 +1142,21 @@ class ConfiguracionTeclasDialog(QDialog):
         fila.addWidget(self.combo_anclaje_zona, 1)
         v.addLayout(fila)
 
+        self.chk_anclaje_automatico = QCheckBox(tr("ajustes_chk_anclaje_auto_man"))
+        self.chk_anclaje_automatico.setToolTip(
+            "Solo aplica con Anclaje B = Downbeat.\n"
+            "Tildado (Manual): los recuadros de mezcla de los dos decks se\n"
+            "ubican y se arrastran libremente, como ya funciona.\n"
+            "Destildado (Automático): al cargar cada tema, el recuadro del\n"
+            "Deck A arranca ubicado al fondo (el final del tema) y el del\n"
+            "Deck B al principio -- pero en ambos casos vos podés moverlos\n"
+            "arrastrando o cambiando de tema con los botones de siguiente\n"
+            "y anterior, exactamente igual que antes.")
+        self.chk_anclaje_automatico.setChecked(
+            bool(self.player.config_data.get(
+                "anclaje_downbeat_automatico", DEF_ANCLAJE_DOWNBEAT_AUTOMATICO)))
+        v.addWidget(self.chk_anclaje_automatico)
+
         self.chk_orden_energia = QCheckBox(tr("ajustes_chk_energia_orden"))
         self.chk_orden_energia.setToolTip(
             "Además de BPM y tono, tiene en cuenta la energía (RMS) para encadenar parejo.")
@@ -1144,9 +1165,18 @@ class ConfiguracionTeclasDialog(QDialog):
 
         v.addStretch()
 
+        self._refrescar_habilitado_anclaje_automatico()
         self.combo_anclaje_zona.currentTextChanged.connect(self._cambiar_anclaje_zona)
+        self.chk_anclaje_automatico.toggled.connect(self._cambiar_anclaje_automatico)
         self.chk_orden_energia.toggled.connect(self._cambiar_orden_energia)
         return grupo
+
+    def _refrescar_habilitado_anclaje_automatico(self):
+        # El tilde Automático/Manual solo tiene sentido con Downbeat --
+        # con Frase se deshabilita (queda gris) para no sugerir que hace
+        # algo que en ese modo no hace nada.
+        self.chk_anclaje_automatico.setEnabled(
+            self.combo_anclaje_zona.currentText() == "Downbeat")
 
     def _grupo_orden(self):
         grupo = self._registrar_i18n(QGroupBox(tr("ajustes_orden_titulo")), "ajustes_orden_titulo")
@@ -2187,6 +2217,29 @@ class ConfiguracionTeclasDialog(QDialog):
         self.player.engine.anclaje_zona_b = valor
         self.player.waveform_next.mix_start_seconds_b = -1.0
         self.player.waveform_next.update()
+        # El Deck A (waveform_current) también sigue este mismo modo --
+        # se resetea su posición manual (mix_start_seconds = -1) para que
+        # vuelva a calcularse desde cero con el modo nuevo recién elegido,
+        # en vez de quedarse pegado en donde había quedado con el modo
+        # anterior.
+        self.player.waveform_current.anclaje_zona_b = valor
+        self.player.waveform_current.mix_start_seconds = -1.0
+        self.player.waveform_current.update()
+        self._refrescar_habilitado_anclaje_automatico()
+        self._confirmar()
+
+    def _cambiar_anclaje_automatico(self, tildado):
+        self.player.config_data["anclaje_downbeat_automatico"] = bool(tildado)
+        guardar_config_app(self.player.config_data)
+        self.player.waveform_next.anclaje_downbeat_automatico = bool(tildado)
+        self.player.waveform_current.anclaje_downbeat_automatico = bool(tildado)
+        # Resetea la posición manual de los dos recuadros para que se
+        # vuelvan a calcular ya con el modo (Automático/Manual) recién
+        # elegido, en vez de quedarse pegados en donde habían quedado.
+        self.player.waveform_next.mix_start_seconds_b = -1.0
+        self.player.waveform_current.mix_start_seconds = -1.0
+        self.player.waveform_next.update()
+        self.player.waveform_current.update()
         self._confirmar()
 
     def _cambiar(self, cual, texto):
@@ -2313,6 +2366,10 @@ class ConfiguracionTeclasDialog(QDialog):
         self.combo_anclaje_zona.setCurrentText(anclaje_txt)
         self.combo_anclaje_zona.blockSignals(False)
         self._cambiar_anclaje_zona(anclaje_txt)
+        self.chk_anclaje_automatico.blockSignals(True)
+        self.chk_anclaje_automatico.setChecked(DEF_ANCLAJE_DOWNBEAT_AUTOMATICO)
+        self.chk_anclaje_automatico.blockSignals(False)
+        self._cambiar_anclaje_automatico(DEF_ANCLAJE_DOWNBEAT_AUTOMATICO)
         self.chk_orden_energia.blockSignals(True)
         self.chk_orden_energia.setChecked(DEF_ORDEN_CONSIDERA_ENERGIA)
         self.chk_orden_energia.blockSignals(False)
