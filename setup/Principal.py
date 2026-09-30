@@ -4928,6 +4928,18 @@ class SmartDJPlayer(QMainWindow):
         return _fade_efectivo_en_segundos(self.engine.bpm_a, self._tiempo_mezcla())
 
     def _aplicar_punto_enganche_configurado(self):
+        # La memoria "pegajosa" (fraccion_enganche, el % del tema donde
+        # quedó el recuadro la última vez) aplica en "Frase" (como
+        # siempre) y en "Downbeat + Manual" (ahí el recuadro se tiene que
+        # quedar donde el usuario lo dejó, para todos los temas, hasta que
+        # lo vuelva a mover). La única excepción es "Downbeat + Automático":
+        # ahí el recuadro tiene que arrancar SIEMPRE al fondo del tema en
+        # cada tema nuevo -- si se aplicara acá la posición pegajosa,
+        # quedaría clavado en el último lugar donde se arrastró y nunca
+        # se volvería a restablecer solo al fondo.
+        if (self.waveform_current.anclaje_zona_b == "downbeat"
+                and self.waveform_current.anclaje_downbeat_automatico):
+            return
         if self.fraccion_enganche is not None and self.waveform_current.duration > 0:
             self.waveform_current.mix_start_seconds = self.fraccion_enganche * self.waveform_current.duration
             self.waveform_current.update()
