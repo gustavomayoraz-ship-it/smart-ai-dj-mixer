@@ -5433,10 +5433,54 @@ class SmartDJPlayer(QMainWindow):
                         and lista.lado_pegado is not None):
                     self._geometria_lista_antes_maximizar = QRect(lista.geometry())
                     self._estirar_lista_hasta_el_fondo(lista)
+
+                # Red de seguridad: "margen_superior" depende de que
+                # Windows ya le haya informado a Qt el tamaño real del
+                # marco de la ventana en este instante -- en otra PC (otra
+                # escala de pantalla, otro monitor, etc.) esa medición
+                # puede salir mal y terminar tapando la barra de título
+                # arriba del borde visible, sin forma de agarrar los
+                # botones de cerrar/maximizar/minimizar (bug reportado en
+                # una PC ajena, nunca reproducido en la nuestra). En vez
+                # de confiar en que el cálculo de arriba siempre dé bien,
+                # una vez aplicado volvemos a medir la geometría REAL ya
+                # asentada y la corregimos si hiciera falta -- así nunca
+                # puede quedar ninguna parte del marco fuera de pantalla,
+                # sea cual sea el motivo. Programado (singleShot 0) para
+                # que se ejecute recién cuando Windows ya terminó de
+                # asentar la geometría que acabamos de pedir.
+                QTimer.singleShot(0, self._asegurar_ventana_visible)
             else:
                 self._restaurar_ancho_normal_interno(restaurar_posicion=True)
         finally:
             self._aplicando_maximizado_ancho = False
+
+    def _asegurar_ventana_visible(self):
+        """Si el marco de la ventana (incluida la barra de título) quedó
+        con alguna parte fuera del área de trabajo del monitor, la mueve
+        lo justo y necesario para que entre entera -- sin tocar el
+        tamaño. Ver el comentario en _alternar_maximizado_ancho."""
+        if not self._ancho_maximizado:
+            return
+        area = _area_trabajo_monitor_fisica(self)
+        if area is None:
+            pantalla = self.screen() or QApplication.primaryScreen()
+            if pantalla is None:
+                return
+            area = pantalla.availableGeometry()
+        marco = self.frameGeometry()
+        dx = 0
+        if marco.left() < area.left():
+            dx = area.left() - marco.left()
+        elif marco.right() > area.right():
+            dx = area.right() - marco.right()
+        dy = 0
+        if marco.top() < area.top():
+            dy = area.top() - marco.top()
+        elif marco.bottom() > area.bottom():
+            dy = area.bottom() - marco.bottom()
+        if dx or dy:
+            self.move(self.x() + dx, self.y() + dy)
 
     def _restaurar_ancho_normal_interno(self, restaurar_posicion):
         """Deshace el ensanchado del maximizado-falso. Con
