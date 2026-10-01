@@ -81,6 +81,18 @@ from setup.ajustes import (
     cargar_parametros_ventana,
     DEF_NORMALIZAR_VOLUMEN,
     DEF_NIVEL_NORMALIZADOR_DB,
+    DEF_PUNTO_A_CRUCE,
+    DEF_PUNTO_B_CRUCE,
+    DEF_BRILLO_AUTOMATICO,
+    DEF_TECHO_BRILLO_PCT,
+    DEF_GOLPE_REFERENCIA_PCT,
+    DEF_GOLPE_SECO_ACTIVO,
+    DEF_GOLPE_SECO_POTENCIA_PCT,
+    DEF_EFECTOS_INTENSIDAD_PCT,
+    DEF_TIEMPO_MEZCLA,
+    DEF_FADE_MINIMO_SEG,
+    DEF_ORDENAR_POR_TONO,
+    DEF_MODO_CARGA_DUPLICADOS,
 )
 
 
@@ -319,7 +331,8 @@ _RAMPA_NORMALIZADOR_SEG = 2.5
 
 def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
                                    ventana_seg=1.0, ganancia_min=0.045, ganancia_max=20.0,
-                                   tiempo_suavizado_seg=3.0):
+                                   tiempo_suavizado_seg=3.0,
+                                   espera_inicial_seg=2.0, transicion_inicial_seg=1.5):
     """Curva de ganancia que normaliza el volumen del tema al nivel
     objetivo, pero DESPACIO: mide el nivel en bloques de 1s (antes medía
     cada 0.5s, reaccionando a cada frase/golpe) y la curva resultante se
@@ -341,7 +354,16 @@ def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
     ninguna desventaja y de paso elimina el desfase de tiempo (fase
     cero): la curva reacciona justo a tiempo con la música en vez de ir
     corrida unos segundos atrás, y suaviza para los dos lados de un
-    cambio brusco, no solo "después"."""
+    cambio brusco, no solo "después".
+
+    Además, los primeros espera_inicial_seg segundos del tema quedan en
+    ganancia neutra (0dB, sin reforzar nada), con una transición suave de
+    transicion_inicial_seg hacia la curva recién calculada. Esto evita que
+    una intro bajita (un ambiente, un silencio con ruido de fondo, etc.)
+    dispare una ganancia enorme antes de que el normalizador haya tenido
+    tiempo de medir de verdad si el tema necesita refuerzo o no -- sin
+    esto, ese ruido de fondo casi inaudible se escuchaba amplificado como
+    un crepitar ("cra cra") justo al arrancar."""
     n = len(y_mono)
     if not activo or n == 0:
         return np.ones(n, dtype=np.float32)
@@ -388,6 +410,21 @@ def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
     alfa = 1.0 - np.exp(-1.0 / max(1e-6, tiempo_suavizado_seg * sr))
     envolvente_db_suave = scipy.signal.filtfilt(
         [alfa], [1.0, -(1.0 - alfa)], envolvente_db)
+
+    # Neutraliza el arranque (ver docstring): nada de ganancia en los
+    # primeros espera_inicial_seg segundos, y de ahí una rampa suave
+    # (coseno, igual que el declick de seek_main_track) hacia la curva ya
+    # calculada, en vez de pegar el salto de golpe a esa altura.
+    espera_muestras = min(int(max(0.0, espera_inicial_seg) * sr), n)
+    if espera_muestras > 0:
+        envolvente_db_suave[:espera_muestras] = 0.0
+    transicion_muestras = min(int(max(0.0, transicion_inicial_seg) * sr),
+                               n - espera_muestras)
+    if transicion_muestras > 1:
+        fin_transicion = espera_muestras + transicion_muestras
+        t = np.linspace(0.0, 1.0, transicion_muestras, dtype=np.float64)
+        peso = 0.5 - 0.5 * np.cos(np.pi * t)
+        envolvente_db_suave[espera_muestras:fin_transicion] *= peso
 
     envolvente = np.power(10.0, envolvente_db_suave / 20.0)
     return envolvente.astype(np.float32)
@@ -2959,11 +2996,19 @@ class SeamlessMixerEngine(QObject):
         arranque comparando contra el nivel del tema anterior."""
         self._estado_nivel_golpe_seco = {}
 
-    def play_initial(self, file_path):
+    def play_initial(self, file_path, mudo_inicial=False):
         _log_debug_tempo(f"play_initial() file={os.path.basename(file_path)} "
                          f"generacion_antes={self._generacion_reproduccion}")
         self.current_file_path = file_path
-        self.status_update.emit(f"Reproduciendo: {os.path.basename(file_path)}")
+        if mudo_inicial:
+            self.status_update.emit(f"Reproduciendo: {os.path.basename(file_path)}")
+        else:
+            # Ya no arranca a sonar con el audio crudo: ver más abajo, se
+            # espera a tener el audio ya analizado/normalizado antes de
+            # reproducir ni una muestra (así nunca hay que "canjear" el
+            # audio con el tema ya sonando, que era lo que se escuchaba
+            # como un empalme feo apenas arrancaba un tema).
+            self.status_update.emit(f"⏳ Preparando: {os.path.basename(file_path)}...")
 
         self._lock_canal_critico.acquire()
         try:
@@ -2988,15 +3033,26 @@ class SeamlessMixerEngine(QObject):
             self.y_mono = None
             self.reset_medidor_golpe_seco()
             self._generacion_reproduccion += 1
+            generacion_capturada = self._generacion_reproduccion
             with self._lock_restaurar_tempo:
                 self._restaurar_tempo_pendiente = None
 
-            self.current_sound_a = pygame.mixer.Sound(file_path)
-            self.chan_a.play(self.current_sound_a)
-            self._chan_a_en_swap_momentaneo = False
             self.gain_a = 1.0
-            self.chan_a.set_volume(float(np.clip(self.gain_a * self.master_volume, 0.0, 1.0)))
-            self.start_time_a = time.monotonic()
+            if mudo_inicial:
+                # Comportamiento para _iniciar_restauracion_reproduccion:
+                # arranca ya con el audio crudo, en silencio (el llamador
+                # pone el volumen en 0 enseguida) -- apenas termine el
+                # análisis de fondo, on_main_analyzed salta a la posición
+                # guardada de la sesión anterior y ahí sí sube el volumen
+                # real. Como nunca se llega a escuchar, no importa que
+                # sea el audio sin normalizar todavía.
+                self.current_sound_a = pygame.mixer.Sound(file_path)
+                self.chan_a.play(self.current_sound_a)
+                self.chan_a.set_volume(float(np.clip(self.gain_a * self.master_volume, 0.0, 1.0)))
+                self.start_time_a = time.monotonic()
+            else:
+                self.start_time_a = 0.0
+            self._chan_a_en_swap_momentaneo = False
             self.start_time_b = 0.0
             self.is_mixing = False
             self.offset_arranque_b_en_a = 0.0
@@ -3023,7 +3079,17 @@ class SeamlessMixerEngine(QObject):
                 fase_downbeat = resultado["fase_downbeat"]
                 if y_mono is None:
                     y_mono = y_mono_precargado
-                if self.current_file_path != file_path:
+                # Si en el medio ya se le dio Detener (dos veces, el que
+                # de verdad vacía las bandejas) o se arrancó OTRO tema,
+                # este análisis quedó obsoleto -- current_file_path cubre
+                # el segundo caso, pero Detener no cambia el archivo
+                # actual, solo sube la generación (ver stop_audio/
+                # play_initial): sin este chequeo, un análisis que
+                # termina tarde reaparecía solo, recargando el tema (y
+                # disparando el precargado del lado B) después de que el
+                # usuario ya había detenido todo a propósito.
+                if (self.current_file_path != file_path
+                        or self._generacion_reproduccion != generacion_capturada):
                     return
                 y_audio_full_crudo = y_audio_full
                 y_audio_full_reforzado, envolvente = _reforzar_con_normalizador_dinamico(
@@ -3033,7 +3099,7 @@ class SeamlessMixerEngine(QObject):
                     y_mono, _redimensionar_envolvente(envolvente, len(y_mono)))
                 self.y_mono = y_mono
                 self.gain_a = 1.0
-                hay_swap_en_caliente = self.chan_a.get_busy() and gain_medio > 1.03
+                hay_swap_en_caliente = mudo_inicial and self.chan_a.get_busy() and gain_medio > 1.03
                 if hay_swap_en_caliente:
                     self.y_audio_full = _construir_buffer_con_rampa(
                         y_audio_full_crudo, y_audio_full_reforzado, audio_sr,
@@ -3050,13 +3116,27 @@ class SeamlessMixerEngine(QObject):
                 self.phrase_boundaries_a = phrase_boundaries
                 self.downbeat_times_a = downbeat_times
                 self.fase_downbeat_a = fase_downbeat
-                if self.chan_a.get_busy():
-                    self.chan_a.set_volume(float(np.clip(self.master_volume, 0.0, 1.0)))
-                    if hay_swap_en_caliente:
-                        try:
-                            self.seek_main_track(self._get_master_position())
-                        except Exception:
-                            pass
+                if mudo_inicial:
+                    if self.chan_a.get_busy():
+                        self.chan_a.set_volume(float(np.clip(self.master_volume, 0.0, 1.0)))
+                        if hay_swap_en_caliente:
+                            try:
+                                self.seek_main_track(self._get_master_position())
+                            except Exception:
+                                pass
+                else:
+                    # Recién acá arranca a sonar -- con el buffer ya
+                    # definitivo (normalizado si hacía falta), desde la
+                    # muestra 0. Todavía no había sonado nada, así que no
+                    # hay ni canje en caliente ni contenido salteado.
+                    if (self.current_file_path != file_path
+                            or self._generacion_reproduccion != generacion_capturada):
+                        return
+                    try:
+                        self.seek_main_track(0.0)
+                    except Exception:
+                        pass
+                    self.status_update.emit(f"▶ Reproduciendo: {os.path.basename(file_path)}")
                 self.main_track_analyzed.emit(
                     y_mono, sr, bpm, list(beat_times), phrase_boundaries, datos_visuales,
                     list(downbeat_times), fase_downbeat)
@@ -4304,18 +4384,19 @@ class SmartDJPlayer(QMainWindow):
             self.config_data.get("nivel_normalizador_db", DEF_NIVEL_NORMALIZADOR_DB))
         self.engine.set_rampa_tempo(float(self.config_data.get("rampa_tempo_seg", 5.0)))
         self.engine.set_puntos_cruce(
-            float(self.config_data.get("punto_a_cruce", 0.0)),
-            float(self.config_data.get("punto_b_cruce", 0.0)))
+            float(self.config_data.get("punto_a_cruce", DEF_PUNTO_A_CRUCE)),
+            float(self.config_data.get("punto_b_cruce", DEF_PUNTO_B_CRUCE)))
         self.engine.set_brillo_percusion(
-            bool(self.config_data.get("brillo_automatico", True)),
+            bool(self.config_data.get("brillo_automatico", DEF_BRILLO_AUTOMATICO)),
             float(self.config_data.get("brillo_manual_pct", 40)),
-            float(self.config_data.get("techo_brillo_automatico_pct", 16.0)),
-            float(self.config_data.get("golpe_referencia_pct", 12.0)))
+            float(self.config_data.get("techo_brillo_automatico_pct", DEF_TECHO_BRILLO_PCT)),
+            float(self.config_data.get("golpe_referencia_pct", DEF_GOLPE_REFERENCIA_PCT)))
         self.engine.set_golpe_seco(
-            bool(self.config_data.get("golpe_seco_activo", False)),
-            float(self.config_data.get("golpe_seco_potencia_pct", 60.0)))
+            bool(self.config_data.get("golpe_seco_activo", DEF_GOLPE_SECO_ACTIVO)),
+            float(self.config_data.get("golpe_seco_potencia_pct", DEF_GOLPE_SECO_POTENCIA_PCT)))
         self.engine.set_efectos_vivo(
-            False, False, float(self.config_data.get("efectos_intensidad_pct", 70.0)))
+            False, False,
+            float(self.config_data.get("efectos_intensidad_pct", DEF_EFECTOS_INTENSIDAD_PCT)))
         self.engine.anclaje_zona_b = (
             "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
             else "downbeat")
@@ -4566,13 +4647,15 @@ class SmartDJPlayer(QMainWindow):
         self._crear_lista_separada()
 
         self.chk_ordenar_por_tono = QCheckBox("BPM")
-        self.chk_ordenar_por_tono.setChecked(bool(self.config_data.get("ordenar_por_tono", False)))
+        self.chk_ordenar_por_tono.setChecked(
+            bool(self.config_data.get("ordenar_por_tono", DEF_ORDENAR_POR_TONO)))
         self.chk_ordenar_por_tono.toggled.connect(self.on_checkbox_ordenar_toggled)
         self.chk_ordenar_por_tono.hide()
         self.combo_modo_carga = QComboBox()
         self.combo_modo_carga.addItems(["📥 Cargar todos", "🧹 Sin duplicados"])
         self.combo_modo_carga.setCurrentIndex(
-            1 if self.config_data.get("modo_carga_duplicados", "todos") == "sin_duplicados" else 0)
+            1 if self.config_data.get("modo_carga_duplicados", DEF_MODO_CARGA_DUPLICADOS)
+            == "sin_duplicados" else 0)
         self.combo_modo_carga.currentIndexChanged.connect(self.on_modo_carga_changed)
         self.combo_modo_carga.hide()
 
@@ -4922,7 +5005,7 @@ class SmartDJPlayer(QMainWindow):
         self._reprocesar_b_debounced()
 
     def _tiempo_mezcla(self) -> float:
-        return float(self.config_data.get("tiempo_mezcla", 15))
+        return float(self.config_data.get("tiempo_mezcla", DEF_TIEMPO_MEZCLA))
 
     def _fade_visual_efectivo(self) -> float:
         return _fade_efectivo_en_segundos(self.engine.bpm_a, self._tiempo_mezcla())
@@ -5067,7 +5150,7 @@ class SmartDJPlayer(QMainWindow):
         pista_b = self.playlist[idx_destino]
         if pista_a.bpm is None or pista_b.bpm is None:
             return base
-        minimo = float(self.config_data.get("fade_minimo_seg", 5.0))
+        minimo = float(self.config_data.get("fade_minimo_seg", DEF_FADE_MINIMO_SEG))
         valor = _duracion_cruce_adaptativa(
             pista_a.bpm, pista_a.tono, pista_b.bpm, pista_b.tono, base, minimo)
         self._fade_duration_cache[clave_cache] = valor
@@ -5777,7 +5860,8 @@ class SmartDJPlayer(QMainWindow):
         if not nuevas_rutas:
             return
         duplicados_omitidos = 0
-        if self.config_data.get("modo_carga_duplicados", "todos") == "sin_duplicados":
+        if self.config_data.get(
+                "modo_carga_duplicados", DEF_MODO_CARGA_DUPLICADOS) == "sin_duplicados":
             self._mostrar_overlay_espera(tr("ppal_overlay_buscando_duplicados"))
             nuevas_rutas, duplicados_omitidos = self._filtrar_rutas_sin_duplicar(nuevas_rutas)
             if not nuevas_rutas:
@@ -6449,7 +6533,7 @@ class SmartDJPlayer(QMainWindow):
             return
         track_path = self.playlist[self.current_index].ruta
         self.waveform_current.is_active = False
-        self.engine.play_initial(track_path)
+        self.engine.play_initial(track_path, mudo_inicial=True)
         self.engine.chan_a.set_volume(0.0)
         self._pausado = False
         self._pausa_timestamp = 0.0

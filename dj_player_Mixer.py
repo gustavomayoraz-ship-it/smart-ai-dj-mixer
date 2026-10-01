@@ -117,7 +117,14 @@ CARPETA_CONFIG = CARPETA_BASE / "config"
 ARCHIVO_CONFIG = CARPETA_CONFIG / "config_app.json"
 
 CONFIG_POR_DEFECTO = {
-    "tiempo_mezcla": 15,
+    # Estos valores tienen que coincidir siempre con las constantes DEF_*
+    # de setup/ajustes.py (que son las que usa el botón "Restaurar todo")
+    # -- si se desalinean, Ajustes puede mostrar/prometer un valor
+    # mientras el motor arranca con otro (varios bugs de este tipo ya se
+    # encontraron y corrigieron: normalizador, Anclaje B, golpe seco,
+    # tiempo de mezcla, fade mínimo, puntos de cruce, brillo, efectos,
+    # orden por tono, carga de duplicados).
+    "tiempo_mezcla": 14,
     "volumen_maestro": 100,
     "lista_temas": [],
     "tecla_mezclar_anterior": None,
@@ -127,17 +134,21 @@ CONFIG_POR_DEFECTO = {
     "anclaje_zona_b": "downbeat",
     "anclaje_downbeat_automatico": True,
     "fraccion_recuadro_a": 0.5,
-    "fade_minimo_seg": 5.0,
-    "punto_a_cruce": 0.0,
+    "fade_minimo_seg": 10,
+    "punto_a_cruce": 0.14,
     "punto_b_cruce": 0.0,
+    "normalizar_volumen": True,
+    "nivel_normalizador_db": -5,
     "brillo_automatico": True,
     "brillo_manual_pct": 40,
-    "techo_brillo_automatico_pct": 16.0,
-    "golpe_referencia_pct": 12.0,
+    "techo_brillo_automatico_pct": 2.0,
+    "golpe_referencia_pct": 50.0,
+    "golpe_seco_activo": True,
+    "golpe_seco_potencia_pct": 100.0,
     "orden_considera_energia": False,
-    "efectos_intensidad_pct": 70.0,
-    "ordenar_por_tono": False,
-    "modo_carga_duplicados": "todos",
+    "efectos_intensidad_pct": 50,
+    "ordenar_por_tono": True,
+    "modo_carga_duplicados": "sin_duplicados",
     "estilo_visual": None,
     # Posición de las ventanas al cerrar el programa, para que la próxima
     # vez arranquen exactamente donde quedaron.
