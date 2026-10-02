@@ -332,7 +332,7 @@ _RAMPA_NORMALIZADOR_SEG = 2.5
 def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
                                    ventana_seg=1.0, ganancia_min=0.045, ganancia_max=20.0,
                                    tiempo_suavizado_seg=3.0,
-                                   espera_inicial_seg=2.0, transicion_inicial_seg=1.5):
+                                   espera_inicial_seg=2.0, transicion_inicial_seg=6.0):
     """Curva de ganancia que normaliza el volumen del tema al nivel
     objetivo, con una envolvente CONTINUA (sin escalones).
 
@@ -359,6 +359,19 @@ def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
        neutra (0 dB), con una transición suave de transicion_inicial_seg
        hacia la curva calculada -- evita que una intro bajita dispare
        una ganancia enorme antes de tener contexto real.
+
+       transicion_inicial_seg quedó en 6s (antes 1.5s) a propósito: este
+       mismo cálculo se usa también para el tema que ENTRA en una mezcla
+       (ver _preparar_mezcla_b), y cuando ese tema entra desde el
+       principio (0.000s, modo "fijo al inicio" o downbeat en el primer
+       compás) esta rampa cae DENTRO del crossfade que ya está haciendo
+       la mezcla. Con 1.5s, un tema que necesita mucha ganancia (por
+       ejemplo +10dB) terminaba de "destaparse" de golpe a mitad del
+       crossfade -- se sentía como un salto brusco de volumen en medio
+       de la mezcla, aparte del cruce normal entre A y B. Con 6s la
+       rampa queda mucho más pareja con la duración típica de un
+       crossfade (la mayoría arrancan en 7-10s) y no se nota como un
+       escalón aparte.
 
     En dB (no en ganancia lineal) porque el oído percibe el volumen en
     escala logarítmica: un mismo salto en dB se siente parecido sin
@@ -443,8 +456,29 @@ def _aplicar_gain_con_limitador(y, gain):
     return np.clip(y_reforzado, -1.0, 1.0).astype(y.dtype, copy=False)
 
 
+def _senal_para_medir_potencia(y_buffer):
+    """Señal auxiliar para MEDIR el nivel real de un audio estéreo, sin
+    el problema de cancelación de fase de librosa.to_mono() (que hace un
+    simple promedio L+R). Si el estéreo viene muy "ensanchado" o con
+    contenido fuera de fase entre canales -- común en muchos remixes/
+    videos de redes sociales -- ese promedio se puede cancelar en buena
+    parte y medir un nivel mucho más bajo del que realmente suena por
+    los dos parlantes juntos (eso fue justo lo que le pasó a un tema de
+    "Tardeo Fiesta": el normalizador lo midió como más flojo de lo que
+    era de verdad y lo terminó reforzando de más, sonando mucho más
+    fuerte que el resto).
+
+    Acá en cambio se combina la POTENCIA (el cuadrado) de cada canal,
+    que nunca se cancela sin importar la fase relativa entre ellos --
+    es la misma idea que un medidor de VU/RMS estéreo real. Para mono
+    no cambia nada (sigue siendo la misma señal de siempre)."""
+    if y_buffer.ndim > 1:
+        return np.sqrt(np.mean(np.square(y_buffer.astype(np.float64)), axis=0))
+    return y_buffer
+
+
 def _reforzar_con_normalizador_dinamico(y_buffer, sr, activo, nivel_db):
-    y_mono_medicion = librosa.to_mono(y_buffer) if y_buffer.ndim > 1 else y_buffer
+    y_mono_medicion = _senal_para_medir_potencia(y_buffer)
     envolvente = _envolvente_ganancia_dinamica(
         y_mono_medicion, sr, activo=activo, nivel_db=nivel_db)
     return _aplicar_gain_con_limitador(y_buffer, envolvente), envolvente
