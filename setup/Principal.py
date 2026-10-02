@@ -2129,6 +2129,15 @@ class WaveformWidget(QWidget):
         self._offset_arrastre_zona = 0.0
         self._movido_a_mano = False
         self._movido_a_mano_b = False
+        # Memoria "pegajosa" del lado B en modo Frase: si el usuario lo
+        # arrastra hasta pegarlo al principio mismo del tema (ver
+        # mouseMoveEvent), queda en True y el recuadro arranca siempre al
+        # principio en los temas que vengan, en vez de volver a buscar la
+        # frase más cercana -- hasta que el usuario lo vuelva a mover a
+        # una frase (ahí vuelve a False y se comporta como siempre). No
+        # se toca en set_audio_data (tiene que sobrevivir el cambio de
+        # tema); clear() sí la resetea (ver más abajo).
+        self.fijo_al_inicio_b = False
         self.offset_entrada = 0.0
         self.offset_reproduccion_en_grafico = 0.0
         self.factor_tempo_grafico = 1.0
@@ -2244,6 +2253,8 @@ class WaveformWidget(QWidget):
             if self.mix_start_seconds_b < 0:
                 if automatico_downbeat:
                     self.mix_start_seconds_b = 0.0
+                elif self.anclaje_zona_b == "frase" and self.fijo_al_inicio_b:
+                    self.mix_start_seconds_b = 0.0
                 else:
                     punto = self._punto_ancla_b()
                     if punto is not None:
@@ -2314,7 +2325,24 @@ class WaveformWidget(QWidget):
             nuevo_x = max(0, min(nuevo_x, width - mix_width))
             centro_tiempo = ((nuevo_x + mix_width / 2.0) / width) * self.duration
             if self.is_incoming_deck:
-                nuevo_borde_izq = self._snap_entrada_b(centro_tiempo)
+                # "Pegado al principio": si el borde izquierdo (antes de
+                # enganchar a ninguna frase) quedó adentro de este margen,
+                # se fuerza derecho al 0.0 -- si no, el enganche a la
+                # frase más cercana (_snap_entrada_b) nunca te deja soltar
+                # justo en el segundo 0 salvo que haya una frase ahí
+                # mismo, así que nunca se podía "pegar al principio" de
+                # verdad. Se graba fijo_al_inicio_b para que los próximos
+                # temas también arranquen ahí; en cualquier otra posición
+                # se vuelve al enganche a frase de siempre.
+                UMBRAL_PEGADO_INICIO_SEG = 1.0
+                borde_crudo = max(0.0, centro_tiempo - self.fade_duration / 2.0)
+                if self.anclaje_zona_b == "frase" and borde_crudo <= UMBRAL_PEGADO_INICIO_SEG:
+                    nuevo_borde_izq = 0.0
+                    self.fijo_al_inicio_b = True
+                else:
+                    nuevo_borde_izq = self._snap_entrada_b(centro_tiempo)
+                    if self.anclaje_zona_b == "frase":
+                        self.fijo_al_inicio_b = False
                 nuevo_borde_izq = min(nuevo_borde_izq, max(0.0, self.duration - self.fade_duration))
                 self.mix_start_seconds_b = nuevo_borde_izq
                 self._movido_a_mano_b = True
@@ -2475,6 +2503,8 @@ class WaveformWidget(QWidget):
         self.mix_start_seconds = -1.0
         self.mix_start_seconds_b = -1.0
         self._movido_a_mano = False
+        self._movido_a_mano_b = False
+        self.fijo_al_inicio_b = False
         self.kick_marker_time = -1.0
         self.is_active = False
         self.offset_visual_seg = 0.0
@@ -2804,6 +2834,14 @@ class SeamlessMixerEngine(QObject):
         self.offset_arranque_b_en_a = 0.0
         self.offset_entrada_b_forzado = None
         self.ruta_offset_entrada_b_forzado = None
+        # Memoria "pegajosa" del lado B en modo Frase: si el usuario lo
+        # arrastra hasta pegarlo al principio mismo del tema (ver
+        # on_punto_entrada_b_movido), queda en True y, a partir de ahí,
+        # TODOS los temas que se precarguen en el lado B (no solo el que
+        # tenía forzado offset_entrada_b_forzado, que es solo para ESE
+        # archivo puntual) arrancan directo en el segundo 0 -- hasta que
+        # el usuario lo vuelva a mover a una frase. Ver preload_next_track.
+        self.fijo_al_inicio_b = False
         self._preparado_b = None
         self._lock_preparado_b = threading.Lock()
         self._prep_en_curso_lock = threading.Lock()
@@ -3361,6 +3399,9 @@ class SeamlessMixerEngine(QObject):
         elif self.anclaje_zona_b == "downbeat":
             mejor_beat_aligned = 0.0
             print("[prep]   modo downbeat: entrada de B desde el principio (0.000s)")
+        elif self.anclaje_zona_b == "frase" and self.fijo_al_inicio_b:
+            mejor_beat_aligned = 0.0
+            print("[prep]   fijo al inicio (a mano): entrada de B desde el principio (0.000s)")
         else:
             marcadores_b = list(phrase_boundaries_b) if len(phrase_boundaries_b) else list(downbeat_times_b)
             marcador_objetivo_b = None
@@ -4995,6 +5036,12 @@ class SmartDJPlayer(QMainWindow):
             tr("ppal_status_punto_enganche").format(pct=f"{fraccion * 100:.0f}"))
 
     def on_punto_entrada_b_movido(self, offset_segundos):
+        # El widget (waveform_next) ya decidió, en el mismo arrastre, si
+        # esto cuenta como "pegado al principio" (ver mouseMoveEvent) --
+        # se copia acá para que preload_next_track lo aplique a TODOS los
+        # temas que vengan, no solo al que tenía forzado el offset (eso
+        # es solo para este archivo puntual, ver más abajo).
+        self.engine.fijo_al_inicio_b = self.waveform_next.fijo_al_inicio_b
         if not (0 <= self.next_index < len(self.playlist)):
             return
         ruta_b = self.playlist[self.next_index].ruta
@@ -5454,6 +5501,20 @@ class SmartDJPlayer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Mientras la ventana está minimizada (o en plena transición de
+        # estado), Windows/Qt mandan resizeEvent con tamaños transitorios
+        # (0x0, alto del taskbar, alto previo sin marco, etc.). Si acá
+        # forzamos el alto fijo en ese momento, el resize se aplica sobre
+        # una geometría que Windows todavía no terminó de asentar y al
+        # restaurar el área cliente queda corrida hacia arriba, tapando la
+        # barra de título. Por eso: si no está en estado "normal", no
+        # tocamos nada y esperamos a changeEvent (ver
+        # _reaplicar_alto_fijo_tras_restaurar).
+        if (self.isMinimized()
+                or self.isMaximized()
+                or self.isFullScreen()
+                or not self.isVisible()):
+            return
         if (not self._ajustando_alto_fijo
                 and self.height() != self._alto_ventana_fijo):
             self._ajustando_alto_fijo = True
@@ -5481,12 +5542,41 @@ class SmartDJPlayer(QMainWindow):
 
     def changeEvent(self, event):
         super().changeEvent(event)
-        if (event.type() == QEvent.WindowStateChange
-                and not self._aplicando_maximizado_ancho
-                and (self.windowState() & Qt.WindowMaximized)):
-            self._aplicando_maximizado_ancho = True
-            self.setWindowState(self.windowState() & ~Qt.WindowMaximized)
-            QTimer.singleShot(0, self._alternar_maximizado_ancho)
+        if event.type() == QEvent.WindowStateChange:
+            # Al restaurar desde minimizado, re-aplicamos el alto fijo
+            # AHORA, cuando la ventana ya está en estado normal y Windows
+            # ya asentó el marco -- esto es lo que evita que el contenido
+            # quede corrido tapando la barra de título (ver resizeEvent).
+            if not self.isMinimized() and not self.isMaximized():
+                QTimer.singleShot(0, self._reaplicar_alto_fijo_tras_restaurar)
+            if (not self._aplicando_maximizado_ancho
+                    and (self.windowState() & Qt.WindowMaximized)):
+                self._aplicando_maximizado_ancho = True
+                self.setWindowState(self.windowState() & ~Qt.WindowMaximized)
+                QTimer.singleShot(0, self._alternar_maximizado_ancho)
+
+    def _reaplicar_alto_fijo_tras_restaurar(self):
+        """Re-aplica el alto fijo (y las esquinas redondeadas) recién
+        cuando la ventana terminó de restaurarse desde minimizado. Se
+        llama vía QTimer.singleShot(0) desde changeEvent, para que corra
+        después de que Windows/Qt ya asentaron la geometría final de la
+        restauración -- así el resize no pisa una geometría transitoria
+        (que era justo lo que dejaba el área cliente corrida hacia
+        arriba, tapando la barra de título)."""
+        if self.isMinimized() or self.isMaximized() or self.isFullScreen():
+            return
+        if self.height() != self._alto_ventana_fijo:
+            self._ajustando_alto_fijo = True
+            try:
+                self.resize(self.width(), self._alto_ventana_fijo)
+            finally:
+                self._ajustando_alto_fijo = False
+        # Al restaurar, Windows puede haber perdido la región redondeada
+        # seteada con SetWindowRgn (sobre todo si la última aplicación fue
+        # con la ventana minimizada), así que forzamos que se recalcule
+        # sobre la geometría ya asentada.
+        _aplicar_esquinas_redondeadas(self)
+        self._refrescar_bordes_ventanas()
 
     def _alternar_maximizado_ancho(self):
         self._aplicando_maximizado_ancho = True
@@ -6954,11 +7044,3 @@ def lanzar_app(config_data: dict) -> None:
 
     player.show()
     sys.exit(app.exec())
-
-
-
-
-
-
-
-
