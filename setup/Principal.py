@@ -334,87 +334,75 @@ def _envolvente_ganancia_dinamica(y_mono, sr, activo=True, nivel_db=8.0,
                                    tiempo_suavizado_seg=3.0,
                                    espera_inicial_seg=2.0, transicion_inicial_seg=1.5):
     """Curva de ganancia que normaliza el volumen del tema al nivel
-    objetivo, pero DESPACIO: mide el nivel en bloques de 1s (antes medía
-    cada 0.5s, reaccionando a cada frase/golpe) y la curva resultante se
-    suaviza con un filtro exponencial de un polo en dB (antes era un
-    promedio móvil de apenas 0.6s). tiempo_suavizado_seg es la constante
-    de tiempo de ese filtro: con 3s, un cambio de nivel tarda varios
-    segundos en terminar de asentarse en vez de saltar casi al instante.
+    objetivo, con una envolvente CONTINUA (sin escalones).
 
-    Antes, al reaccionar tan rápido, el volumen quedaba "bombeando"
-    (subiendo y bajando todo el tiempo, con la sensación de cortes
-    chiquitos en los cambios más bruscos). Suavizado en dB (no en
-    ganancia lineal) para que el oído perciba el cambio como parejo,
-    ya que percibimos el volumen en escala logarítmica.
+    Reemplaza al esquema viejo de "bloques de 1s + interpolar + filtrar",
+    que generaba escalones audibles (la sensación de "escalera" al
+    cambiar de volumen entre secciones del tema). Ahora:
 
-    El filtro se aplica con filtfilt (adelante y atrás), no con lfilter
-    (que solo mira para atrás, "en vivo"). Acá no hace falta ser causal
-    -- el tema entero ya está analizado de antemano en memoria antes de
-    reproducirse, no llega de a poco -- así que filtfilt no tiene
-    ninguna desventaja y de paso elimina el desfase de tiempo (fase
-    cero): la curva reacciona justo a tiempo con la música en vez de ir
-    corrida unos segundos atrás, y suaviza para los dos lados de un
-    cambio brusco, no solo "después".
+    1. Envolvente de energía CONTINUA muestra a muestra (filtro
+       exponencial de un polo = RMS deslizante con memoria exponencial).
+       Antes se partía el audio en bloques de 1s y se guardaba UN valor
+       por bloque, y después se interpolaba linealmente entre esos
+       valores -- eso generaba los escalones visibles.
 
-    Además, los primeros espera_inicial_seg segundos del tema quedan en
-    ganancia neutra (0dB, sin reforzar nada), con una transición suave de
-    transicion_inicial_seg hacia la curva recién calculada. Esto evita que
-    una intro bajita (un ambiente, un silencio con ruido de fondo, etc.)
-    dispare una ganancia enorme antes de que el normalizador haya tenido
-    tiempo de medir de verdad si el tema necesita refuerzo o no -- sin
-    esto, ese ruido de fondo casi inaudible se escuchaba amplificado como
-    un crepitar ("cra cra") justo al arrancar."""
+    2. Ganancia en dB muestra a muestra contra esa envolvente continua,
+       con los mismos topes de ganancia_min / ganancia_max de antes.
+
+    3. Suavizado final en dB con filtfilt (fase cero). Como la señal de
+       entrada YA es continua (paso 1), este suavizado ahora sí logra
+       una curva final sin ninguna discontinuidad -- antes se aplicaba
+       sobre una curva escalonada y apenas redondeaba las esquinas de
+       cada escalón.
+
+    4. Los primeros espera_inicial_seg segundos quedan en ganancia
+       neutra (0 dB), con una transición suave de transicion_inicial_seg
+       hacia la curva calculada -- evita que una intro bajita dispare
+       una ganancia enorme antes de tener contexto real.
+
+    En dB (no en ganancia lineal) porque el oído percibe el volumen en
+    escala logarítmica: un mismo salto en dB se siente parecido sin
+    importar el nivel de partida."""
     n = len(y_mono)
     if not activo or n == 0:
         return np.ones(n, dtype=np.float32)
 
     nivel_db = float(np.clip(nivel_db, -25.0, 20.0))
     rms_objetivo = _RMS_REFERENCIA_0DB * (10.0 ** (nivel_db / 20.0))
-    ventana = max(1, int(ventana_seg * sr))
-    salto = max(1, ventana // 2)
 
-    posiciones = []
-    ganancias_db = []
-    i = 0
-    ultimo_g = 1.0
-    while i < n:
-        bloque = y_mono[i:i + ventana]
-        if bloque.size == 0:
-            break
-        rms_bloque = float(np.sqrt(np.mean(np.square(bloque))))
-        if rms_bloque <= 1e-4:
-            g = ultimo_g
-        else:
-            g = float(np.clip(rms_objetivo / rms_bloque, ganancia_min, ganancia_max))
-        ultimo_g = g
-        posiciones.append(i + bloque.size / 2.0)
-        ganancias_db.append(20.0 * np.log10(max(g, 1e-6)))
-        i += salto
+    # --- Paso 1: envolvente de energía continua (muestra a muestra) ---
+    y = np.asarray(y_mono, dtype=np.float64)
+    energia = y * y
 
-    if not posiciones:
-        return np.ones(n, dtype=np.float32)
-    if len(posiciones) == 1:
-        return np.full(n, float(10.0 ** (ganancias_db[0] / 20.0)), dtype=np.float32)
+    # Filtro exponencial de un polo sobre la energía instantánea: es un
+    # RMS deslizante con memoria exponencial. alpha chico = memoria
+    # larga = envolvente más lenta/estable; alpha grande = reacciona
+    # rápido. La constante de tiempo es ventana_seg (mismo parámetro que
+    # ya existía, ahora interpretado como tau del filtro en vez de como
+    # "tamaño del bloque").
+    alpha_env = 1.0 - np.exp(-1.0 / max(1e-6, ventana_seg * sr))
+    envolvente_energia = scipy.signal.lfilter(
+        [alpha_env], [1.0, -(1.0 - alpha_env)], energia)
 
-    posiciones = np.asarray(posiciones, dtype=np.float64)
-    ganancias_db = np.asarray(ganancias_db, dtype=np.float64)
-    muestras = np.arange(n, dtype=np.float64)
-    envolvente_db = np.interp(muestras, posiciones, ganancias_db,
-                               left=ganancias_db[0], right=ganancias_db[-1])
+    # RMS instantáneo (piso 1e-12 para no dividir por cero en silencios)
+    rms_continua = np.sqrt(np.maximum(envolvente_energia, 1e-12))
 
-    # Suavizado exponencial de un polo, aplicado con filtfilt (adelante
-    # y atrás -- ver docstring) en vez de lfilter. Sigue siendo
-    # equivalente a un "attack/release" lento y parejo, muy distinto del
-    # promedio móvil de antes (que dejaba pasar cambios bruscos casi sin
-    # filtrar), pero ahora sin el desfase de un filtro causal.
-    alfa = 1.0 - np.exp(-1.0 / max(1e-6, tiempo_suavizado_seg * sr))
+    # --- Paso 2: ganancia en dB, muestra a muestra ---
+    # np.clip antes del log10 evita log(0) y respeta los topes de
+    # ganancia tal cual estaban definidos.
+    ratio = np.clip(rms_objetivo / rms_continua, ganancia_min, ganancia_max)
+    ganancia_db_cruda = 20.0 * np.log10(ratio)
+
+    # --- Paso 3: suavizado final en dB, fase cero (filtfilt) ---
+    # Como la entrada ya es continua, este filtfilt SÍ produce una curva
+    # final sin saltos. La constante de tiempo tiempo_suavizado_seg es
+    # lo que controla "cuán lento" reacciona el normalizador: subirlo =
+    # más suave pero más lento; bajarlo = más rápido pero más agresivo.
+    alpha_db = 1.0 - np.exp(-1.0 / max(1e-6, tiempo_suavizado_seg * sr))
     envolvente_db_suave = scipy.signal.filtfilt(
-        [alfa], [1.0, -(1.0 - alfa)], envolvente_db)
+        [alpha_db], [1.0, -(1.0 - alpha_db)], ganancia_db_cruda)
 
-    # Neutraliza el arranque (ver docstring): nada de ganancia en los
-    # primeros espera_inicial_seg segundos, y de ahí una rampa suave
-    # (coseno, igual que el declick de seek_main_track) hacia la curva ya
-    # calculada, en vez de pegar el salto de golpe a esa altura.
+    # --- Paso 4: neutralizar el arranque (misma lógica que antes) ---
     espera_muestras = min(int(max(0.0, espera_inicial_seg) * sr), n)
     if espera_muestras > 0:
         envolvente_db_suave[:espera_muestras] = 0.0
@@ -2853,6 +2841,13 @@ class SeamlessMixerEngine(QObject):
         self.audio_sr = 44100
         self.y_mono = None
         self._audio_activo_crudo = None
+        # Nivel (dB) con el que se "horneó" (procesó) el buffer actual de
+        # y_audio_full/_audio_activo_crudo. Se usa en
+        # reaplicar_normalizador_en_vivo() para saber cuánto hay que
+        # corregir el volumen EN VIVO cuando el usuario mueve el slider
+        # (la diferencia entre el nivel nuevo y este), en vez de aplicar
+        # el nivel nuevo como si el buffer no tuviera ya ganancia aplicada.
+        self._nivel_db_horneado_actual = None
         # Audio de B disponible DURANTE la mezcla (mientras y_audio_full
         # todavía es el de A, saliendo) -- así la barrita de golpe seco
         # puede seguir al que se escuche más fuerte en cada instante, en
@@ -2864,6 +2859,9 @@ class SeamlessMixerEngine(QObject):
         # golpe seco, uno por deck ("a"/"b") para que no se pisen entre
         # sí. Ver nivel_golpe_seco_en_vivo().
         self._estado_nivel_golpe_seco = {}
+        # Suavizado de la etiqueta de nivel en dB en vivo (una entrada por
+        # deck, aunque hoy solo se usa "a"). Ver nivel_db_en_vivo().
+        self._estado_nivel_db_en_vivo = {}
         self._timer_normalizador_en_vivo = QTimer(self)
         self._timer_normalizador_en_vivo.setSingleShot(True)
         self._timer_normalizador_en_vivo.timeout.connect(self.reaplicar_normalizador_en_vivo)
@@ -2889,31 +2887,132 @@ class SeamlessMixerEngine(QObject):
     def set_normalizador(self, activo: bool, nivel_db: float) -> None:
         self.normalizar_activo = bool(activo)
         self.normalizar_nivel_db = float(np.clip(nivel_db, -25.0, 20.0))
-        self._timer_normalizador_en_vivo.start(4000)
+        # 300 ms: respuesta casi inmediata al slider, y si lo movés varias
+        # veces seguidas se reinicia en cada cambio (single shot), así que
+        # el recálculo pesado solo se lanza UNA vez al final, cuando ya
+        # dejaste de moverlo.
+        self._timer_normalizador_en_vivo.start(300)
 
     def reaplicar_normalizador_en_vivo(self) -> None:
+        """Aplica el cambio de nivel del normalizador en vivo.
+
+        IMPORTANTE (v3): el recálculo del buffer se hace en un hilo de
+        fondo, NO en el hilo principal de Qt. Antes se hacía acá mismo
+        y bloqueaba la ventana 200-500 ms cada vez que tocabas el
+        slider -> se sentía como congelamiento.
+
+        Cómo funciona ahora:
+
+        1. Se calcula el volumen objetivo del canal que está sonando y se
+           anima suavemente (esto es rápido, no bloquea). OJO: el buffer
+           que está sonando ya tiene horneada la ganancia correspondiente
+           a self._nivel_db_horneado_actual (el nivel que estaba activo
+           cuando se armó ese buffer), así que el ajuste inmediato tiene
+           que ser la diferencia entre el nivel nuevo y ese nivel horneado
+           -- no el nivel nuevo "a secas", porque eso aplicaría la
+           corrección dos veces (una ya horneada en las muestras, otra de
+           golpe en el volumen del canal).
+        2. Se lanza un hilo de fondo que recalcula el buffer completo
+           con el nivel nuevo y lo deja guardado para el próximo seek
+           o cambio de tema. Si mientras tanto movés el slider otra
+           vez, el recálculo viejo se cancela y se hace solo el último.
+        """
         if self.is_mixing:
             return
+
         crudo = self._audio_activo_crudo
         if crudo is None:
             return
-        viejo = self.y_audio_full
-        nuevo, _envolvente = _reforzar_con_normalizador_dinamico(
-            crudo, self.audio_sr, self.normalizar_activo, self.normalizar_nivel_db)
 
-        if self.chan_a.get_busy():
-            self.y_audio_full = _construir_buffer_con_rampa(
-                viejo, nuevo, self.audio_sr, self._get_master_position())
-            self.gain_a = 1.0
+        # --- Ajuste de volumen INMEDIATO (no bloquea nada) ---
+        try:
+            if self.chan_a.get_busy():
+                nivel_db_objetivo = float(self.normalizar_nivel_db)
+                nivel_db_horneado = self._nivel_db_horneado_actual
+                if nivel_db_horneado is None:
+                    nivel_db_horneado = nivel_db_objetivo
+                # Diferencia respecto de lo que YA está horneado en el
+                # buffer que está sonando -- ver docstring.
+                delta_db = nivel_db_objetivo - nivel_db_horneado
+                factor_delta = 10.0 ** (delta_db / 20.0)
+                vol_objetivo = float(np.clip(
+                    self.gain_a * self.master_volume * factor_delta, 0.0, 1.0))
+                self._animar_volumen_canal_a(vol_objetivo)
+        except Exception as e:
+            print(f"[normalizador] Aviso: falló el ajuste de volumen en vivo: {e}")
+
+        # --- Recálculo del buffer en HILO DE FONDO (sin bloquear) ---
+        generacion_actual = getattr(self, "_generacion_normalizador", 0) + 1
+        self._generacion_normalizador = generacion_actual
+        activo = bool(self.normalizar_activo)
+        nivel = float(self.normalizar_nivel_db)
+        sr = self.audio_sr
+
+        def _recalcular_en_fondo():
             try:
-                self.seek_main_track(self._get_master_position())
-            except Exception:
-                pass
-        else:
+                nuevo, _envolvente = _reforzar_con_normalizador_dinamico(
+                    crudo, sr, activo, nivel)
+            except Exception as e:
+                print(f"[normalizador] Aviso: falló el recálculo del buffer: {e}")
+                return
+            # Si mientras tanto se movió el slider otra vez, este
+            # recálculo quedó obsoleto: lo descartamos para no pisar
+            # uno más nuevo con uno viejo.
+            if getattr(self, "_generacion_normalizador", 0) != generacion_actual:
+                return
+            # Guardamos el buffer nuevo listo para el próximo seek /
+            # cambio de tema -- el audio en vivo no se reemplaza acá, así
+            # que self._nivel_db_horneado_actual (lo que está SONANDO de
+            # verdad en este momento) queda sin tocar a propósito: si el
+            # usuario mueve el slider de nuevo antes del próximo seek, el
+            # ajuste inmediato tiene que seguir midiéndose contra lo que
+            # hay realmente horneado en las muestras que están sonando,
+            # no contra este recálculo todavía no aplicado.
             self.y_audio_full = nuevo
-            self.gain_a = 1.0
-            self.chan_a.set_volume(float(np.clip(self.master_volume, 0.0, 1.0)))
+            self.y_mono = None  # se recalcula al vuelo si hace falta
 
+        threading.Thread(target=_recalcular_en_fondo, daemon=True).start()
+
+    def _animar_volumen_canal_a(self, vol_objetivo: float):
+        """Anima el volumen del canal A desde su valor actual hasta
+        vol_objetivo, en pasos cortos, sin bloquear el hilo de Qt.
+
+        Se usa un QTimer de un solo disparo que se reprograma a sí mismo
+        en cada paso. A diferencia de un bucle con time.sleep(), esto
+        deja que la ventana siga respondiendo normalmente."""
+        pasos = 20
+        duracion_total_ms = 400
+        intervalo_ms = max(1, duracion_total_ms // pasos)
+
+        try:
+            vol_inicial = float(self.chan_a.get_volume())
+        except Exception:
+            vol_inicial = float(self.master_volume)
+
+        estado = {"paso": 0}
+
+        def _tick():
+            try:
+                if not self.chan_a.get_busy():
+                    timer.stop()
+                    return
+                estado["paso"] += 1
+                t = min(1.0, estado["paso"] / pasos)
+                peso = 0.5 - 0.5 * np.cos(np.pi * t)
+                vol_actual = vol_inicial + (vol_objetivo - vol_inicial) * float(peso)
+                self.chan_a.set_volume(float(np.clip(vol_actual, 0.0, 1.0)))
+                if estado["paso"] >= pasos:
+                    timer.stop()
+            except Exception:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        timer = QTimer(self)
+        timer.setInterval(intervalo_ms)
+        timer.timeout.connect(_tick)
+        timer.start()
     def set_rampa_tempo(self, segundos: float) -> None:
         self.rampa_tempo_seg = float(np.clip(segundos, 0.0, 15.0))
 
@@ -3028,11 +3127,80 @@ class SeamlessMixerEngine(QObject):
         nivel = transiente / 0.10
         return float(np.clip(nivel, 0.0, 1.0))
 
+    def nivel_db_en_vivo(self, pos_segundos, audio=None, sr=None, clave="a"):
+        """Nivel RMS real del audio que está sonando AHORA MISMO (ya
+        procesado por el normalizador), en dB relativos a la misma
+        referencia que usa el normalizador para calcular su ganancia
+        (_RMS_REFERENCIA_0DB). Si el normalizador está funcionando bien,
+        este número debería rondar normalizar_nivel_db sin importar qué
+        tema esté sonando -- es justo para eso: para poder comprobar a
+        ojo que distintos temas realmente terminan sonando al mismo
+        nivel, en vez de confiar a ciegas en que el cálculo esté bien.
+
+        Mide una ventana de 1s (mucho más ancha que la de la barrita de
+        golpe seco, que necesita reaccionar rápido a cada bombo -- acá
+        al revés, conviene una lectura estable tipo "promedio" en vez de
+        seguir cada vaivén momentáneo del tema) y la suaviza encima con
+        un filtro de un polo en dB de 2s de constante de tiempo, con
+        estado propio por `clave` igual que nivel_golpe_seco_en_vivo().
+        Entre la ventana ancha y el suavizado lento, el número que se ve
+        en pantalla queda bastante más parejo que la energía real
+        instantánea del tema (que sí varía de verdad segundo a segundo,
+        por diseño del normalizador) -- achica la fluctuación visible
+        sin inventar un valor falso: sigue siendo un promedio real de lo
+        que está sonando, solo que mirado en una ventana más larga.
+
+        Devuelve None si no hay nada sonando o no se puede medir (la
+        llamada lo interpreta como "sin dato", para mostrar algo como
+        "-- dB" en vez de un número engañoso)."""
+        y = self.y_audio_full if audio is None else audio
+        if y is None:
+            return None
+        sr = (sr if sr is not None else self.audio_sr) or 44100
+        pos_compensada = max(0.0, float(pos_segundos) - LATENCIA_COMPENSACION_SEG)
+        try:
+            total = y.shape[1] if y.ndim == 2 else len(y)
+            idx = int(pos_compensada * sr)
+            if idx < 0 or idx >= total:
+                return None
+            ventana = max(8, int(1.000 * sr))
+            ini = max(0, idx - ventana // 2)
+            fin = min(total, idx + ventana // 2)
+            if fin <= ini:
+                return None
+            if y.ndim == 2:
+                trozo_mono = y[:, ini:fin].mean(axis=0)
+            else:
+                trozo_mono = y[ini:fin]
+            trozo_mono = np.asarray(trozo_mono, dtype=np.float64)
+            if trozo_mono.size < 8:
+                return None
+            rms = float(np.sqrt(np.mean(trozo_mono ** 2)))
+        except Exception:
+            return None
+        if rms <= 1e-7:
+            return None
+        db_instantaneo = 20.0 * np.log10(rms / _RMS_REFERENCIA_0DB)
+
+        ahora = time.monotonic()
+        estado = self._estado_nivel_db_en_vivo.get(clave)
+        if estado is None:
+            estado = {"t": ahora, "db": db_instantaneo}
+            self._estado_nivel_db_en_vivo[clave] = estado
+            return float(db_instantaneo)
+        dt = max(0.0, min(0.25, ahora - estado["t"]))
+        estado["t"] = ahora
+        tau = 2.0
+        alpha = 1.0 - math.exp(-dt / tau) if dt > 0 else 1.0
+        estado["db"] += alpha * (db_instantaneo - estado["db"])
+        return float(estado["db"])
+
     def reset_medidor_golpe_seco(self):
-        """Limpia el estado del seguidor de envolvente de la barrita --
-        se llama al cargar/cambiar de tema para que la transiente no
-        arranque comparando contra el nivel del tema anterior."""
+        """Limpia el estado de los medidores en vivo (barrita de golpe
+        seco y etiqueta de nivel en dB) -- se llama al cargar/cambiar de
+        tema para que no arranquen comparando contra el tema anterior."""
         self._estado_nivel_golpe_seco = {}
+        self._estado_nivel_db_en_vivo = {}
 
     def play_initial(self, file_path, mudo_inicial=False):
         _log_debug_tempo(f"play_initial() file={os.path.basename(file_path)} "
@@ -3145,6 +3313,7 @@ class SeamlessMixerEngine(QObject):
                 else:
                     self.y_audio_full = y_audio_full_reforzado
                 self._audio_activo_crudo = y_audio_full_crudo
+                self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
                 self.audio_sr = audio_sr
                 self.y_nativo_completo_actual = self.y_audio_full
                 self.offset_entrada_actual = 0.0
@@ -3771,6 +3940,7 @@ class SeamlessMixerEngine(QObject):
                         self.current_sound_a = nuevo_sonido
                         self.y_audio_full = audio_final
                         self._audio_activo_crudo = audio_final_crudo
+                        self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
                         self.audio_sr = sr
                         self.y_mono = y_mono_final
                         self.gain_a = 1.0
@@ -3992,6 +4162,7 @@ class SeamlessMixerEngine(QObject):
                 self.current_sound_a = sound_next
                 self.y_audio_full = preparado["y_aligned_stereo"]
                 self._audio_activo_crudo = preparado["y_aligned_stereo_crudo"]
+                self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
                 self.audio_sr = preparado["sr"]
                 self.y_mono = preparado["y_mono_final"]
                 self.y_nativo_completo_actual = preparado["y_next_nativo_completo"]
@@ -4301,15 +4472,17 @@ def _formatear_duracion_separador(segundos: float) -> str:
     if horas > 0:
         return f"{horas}:{minutos:02d}:{segs:02d}"
     return f"{minutos}:{segs:02d}"
-
-
 class SmartDJPlayer(QMainWindow):
     waveform_previa_lista = Signal(str, np.ndarray, int, float, list, list, object, list, int)
     orden_lista_calculado = Signal(list, object)
 
     def __init__(self, config_data):
         super().__init__()
-        self.setWindowTitle("Smart AI DJ Mixer")
+        # Se guarda aparte para poder reconstruir el título agregándole
+        # el nivel en dB en vivo (ver update_play_progress()) sin
+        # perder el nombre de la app.
+        self._titulo_base_ventana = "Smart AI DJ Mixer"
+        self.setWindowTitle(self._titulo_base_ventana)
         self._alto_ventana_fijo = 380
         self._ajustando_alto_fijo = False
         self.setMinimumWidth(400)
@@ -4384,6 +4557,11 @@ class SmartDJPlayer(QMainWindow):
         self._rectangulo_fijo_por_frase = False
         self._mezcla_pendiente_objetivo = "siguiente"
         self._pausado = False
+        # La etiqueta de nivel en dB se actualiza cada 500ms (no en cada
+        # tick del timer de 33ms como la barra de golpe seco o el
+        # waveform) -- a 30 veces por segundo el número cambiaba todo el
+        # tiempo y se veía nervioso/tembloroso, poco legible.
+        self._ultimo_update_nivel_db = 0.0
         self._pausa_timestamp = 0.0
         # Posición (en segundos) en la que quedó pausado el tema actual --
         # se actualiza justo antes de pausar (Play/Stop) porque mientras
@@ -4645,11 +4823,11 @@ class SmartDJPlayer(QMainWindow):
         self.btn_limpiar_lista.setToolTip(tr("ppal_tooltip_limpiar_lista"))
         self.btn_limpiar_lista.clicked.connect(self.limpiar_lista_completa)
         fila_botones_lista.addWidget(self.btn_limpiar_lista)
-        self.btn_reordenar_auto = QPushButton(tr("ppal_btn_reordenar_auto"))
-        self.btn_reordenar_auto.setStyleSheet(ESTILO_BOTON_REORDENAR)
-        self.btn_reordenar_auto.setToolTip(tr("ppal_tooltip_reordenar_auto"))
-        self.btn_reordenar_auto.clicked.connect(self.reactivar_orden_automatico)
-        fila_botones_lista.addWidget(self.btn_reordenar_auto)
+        # El botón de "Reordenar auto" que estaba acá se movió a la
+        # ventana de la lista (junto al buscador) -- ver Lista.py,
+        # self.btn_reordenar. El nivel en dB en vivo que estuvo acá un
+        # rato como etiqueta ahora se muestra en la barra de título (ver
+        # self._titulo_base_ventana y update_play_progress()).
         self.btn_mostrar_lista = QPushButton(tr("ppal_btn_ocultar_lista"))
         self.btn_mostrar_lista.setToolTip(tr("ppal_tooltip_mostrar_lista"))
         self.btn_mostrar_lista.clicked.connect(self._alternar_visibilidad_lista)
@@ -5278,6 +5456,33 @@ class SmartDJPlayer(QMainWindow):
                         sr=self.engine._sr_b_en_mezcla, clave="b")
                     nivel = max(nivel, nivel_b)
                 self.barra_golpe_seco.set_nivel(nivel)
+            except Exception:
+                pass
+            try:
+                # Nivel en dB en vivo, mostrado en la barra de título al
+                # lado del nombre de la app -- ver
+                # SeamlessMixerEngine.nivel_db_en_vivo() para qué mide y
+                # para qué sirve. Durante una mezcla seguimos mostrando
+                # el nivel de A (el tema "principal" hasta que termine
+                # la mezcla).
+                #
+                # Se LLAMA en cada tick (cada 33ms) para que el filtro de
+                # suavizado interno de nivel_db_en_vivo tenga pasos
+                # chicos y parejos -- pero el TÍTULO solo se refresca
+                # cada 500ms, porque a 30 veces por segundo el número
+                # cambiaba todo el tiempo y se veía nervioso (y
+                # reescribir la barra de título del SO 30 veces por
+                # segundo tampoco tiene sentido).
+                db_en_vivo = self.engine.nivel_db_en_vivo(pos_a, clave="a")
+                ahora = time.monotonic()
+                if ahora - self._ultimo_update_nivel_db >= 0.5:
+                    self._ultimo_update_nivel_db = ahora
+                    if db_en_vivo is None:
+                        self.setWindowTitle(self._titulo_base_ventana)
+                    else:
+                        self.setWindowTitle(
+                            self._titulo_base_ventana + "     "
+                            + tr("ppal_nivel_db_formato").format(db=db_en_vivo))
             except Exception:
                 pass
             if self.engine.is_mixing:
@@ -6851,6 +7056,7 @@ class SmartDJPlayer(QMainWindow):
         self.btn_play.setText("▶")
         if hasattr(self, "barra_golpe_seco"):
             self.barra_golpe_seco.reset()
+        self.setWindowTitle(self._titulo_base_ventana)
         self.engine.reset_medidor_golpe_seco()
 
     def _buscar_borde_izq_frase_que_entra(self, pos_a):
@@ -7044,3 +7250,7 @@ def lanzar_app(config_data: dict) -> None:
 
     player.show()
     sys.exit(app.exec())
+
+
+
+

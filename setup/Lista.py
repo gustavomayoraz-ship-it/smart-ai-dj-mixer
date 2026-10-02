@@ -715,9 +715,27 @@ class VentanaListaSeparada(QWidget):
         self.btn_aleatorio.clicked.connect(self._player.toggle_modo_aleatorio)
         self.set_estado_boton_aleatorio(False)
 
+        # Botón de reordenar automáticamente: antes vivía en el
+        # reproductor (self.btn_reordenar_auto en Principal.py), se movió
+        # acá al lado del buscador -- mismo tamaño/estilo que
+        # btn_aleatorio (ver arriba), solo cambia el símbolo ("R" de
+        # Reordenar en vez de 🔀/☰).
+        self.btn_reordenar = QPushButton("R")
+        self.btn_reordenar.setFixedSize(34, 30)
+        self.btn_reordenar.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #2b2b2b; color: #e0e0e0;"
+            "  border: 1px solid #3a3a3a; border-radius: 4px;"
+            "  padding: 4px; font-size: 14px; }"
+            "QPushButton:hover { border: 1px solid #00ff80; }"
+        )
+        self.btn_reordenar.setToolTip(tr("ppal_tooltip_reordenar_auto"))
+        self.btn_reordenar.clicked.connect(self._player.reactivar_orden_automatico)
+
         hlayout_buscar = QHBoxLayout()
         hlayout_buscar.setSpacing(6)
         hlayout_buscar.addWidget(self.txt_buscar, 1)
+        hlayout_buscar.addWidget(self.btn_reordenar, 0)
         hlayout_buscar.addWidget(self.btn_aleatorio, 0)
         vlayout.addLayout(hlayout_buscar)
 
