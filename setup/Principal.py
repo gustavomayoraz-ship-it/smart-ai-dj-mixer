@@ -2901,6 +2901,16 @@ class SeamlessMixerEngine(QObject):
         # (la diferencia entre el nivel nuevo y este), en vez de aplicar
         # el nivel nuevo como si el buffer no tuviera ya ganancia aplicada.
         self._nivel_db_horneado_actual = None
+        # Factor (lineal, no dB) de la corrección EN VIVO que
+        # reaplicar_normalizador_en_vivo() le aplica al volumen del canal
+        # A por encima de lo ya horneado -- 1.0 = sin corrección pendiente
+        # (igual a lo horneado). set_master_volume() y cualquier otro lugar
+        # que reconstruya el volumen de A a partir de gain_a*master_volume
+        # tiene que multiplicar también por esto, si no, CUALQUIER toque
+        # del volumen maestro pisaba la corrección del normalizador y la
+        # dejaba en "casi no se nota" hasta el próximo seek/cambio de tema
+        # (que sí recién ahí aplica el buffer recalculado de verdad).
+        self._factor_delta_normalizador_en_vivo = 1.0
         # Audio de B disponible DURANTE la mezcla (mientras y_audio_full
         # todavía es el de A, saliendo) -- así la barrita de golpe seco
         # puede seguir al que se escuche más fuerte en cada instante, en
@@ -2988,8 +2998,23 @@ class SeamlessMixerEngine(QObject):
                 # buffer que está sonando -- ver docstring.
                 delta_db = nivel_db_objetivo - nivel_db_horneado
                 factor_delta = 10.0 ** (delta_db / 20.0)
-                vol_objetivo = float(np.clip(
-                    self.gain_a * self.master_volume * factor_delta, 0.0, 1.0))
+                # Se guarda para que set_master_volume (y cualquier otro
+                # lugar que reconstruya el volumen de A) lo respete en vez
+                # de pisarlo -- ver el comentario en __init__.
+                self._factor_delta_normalizador_en_vivo = factor_delta
+                vol_sin_tope = self.gain_a * self.master_volume * factor_delta
+                vol_objetivo = float(np.clip(vol_sin_tope, 0.0, 1.0))
+                # Diagnóstico temporal: si vol_sin_tope > 1.0, el volumen
+                # del canal (que pygame limita duro a 1.0, sin la rampa
+                # suave que sí tiene el refuerzo del buffer horneado)
+                # se está topando ahí y el aumento pedido no se escucha
+                # completo -- a diferencia del próximo tema (B), que
+                # recibe el refuerzo horneado directo en las muestras.
+                print(f"[normalizador-live] objetivo={nivel_db_objetivo:.1f}dB "
+                      f"horneado={nivel_db_horneado:.1f}dB delta={delta_db:+.1f}dB "
+                      f"gain_a={self.gain_a:.3f} master_volume={self.master_volume:.3f} "
+                      f"vol_sin_tope={vol_sin_tope:.3f} vol_objetivo={vol_objetivo:.3f}"
+                      f"{' <-- TOPADO EN 1.0' if vol_sin_tope > 1.0 else ''}")
                 self._animar_volumen_canal_a(vol_objetivo)
         except Exception as e:
             print(f"[normalizador] Aviso: falló el ajuste de volumen en vivo: {e}")
@@ -3099,7 +3124,16 @@ class SeamlessMixerEngine(QObject):
         self.master_volume = val_percent / 100.0
         if not self.is_mixing:
             if self.chan_a.get_busy():
-                self.chan_a.set_volume(float(np.clip(self.gain_a * self.master_volume, 0.0, 1.0)))
+                # OJO: hay que respetar acá la corrección EN VIVO del
+                # normalizador (_factor_delta_normalizador_en_vivo) -- si
+                # no, tocar el volumen maestro (aunque sea un toque
+                # mínimo) pisaba esa corrección y la volvía a dejar en lo
+                # que ya estaba horneado, como si el slider del
+                # normalizador no hubiera hecho nada. Ver el comentario en
+                # __init__ y en reaplicar_normalizador_en_vivo.
+                self.chan_a.set_volume(float(np.clip(
+                    self.gain_a * self.master_volume
+                    * self._factor_delta_normalizador_en_vivo, 0.0, 1.0)))
             if self.chan_b.get_busy():
                 self.chan_b.set_volume(float(np.clip(self.gain_b * self.master_volume, 0.0, 1.0)))
 
@@ -3367,6 +3401,7 @@ class SeamlessMixerEngine(QObject):
                     self.y_audio_full = y_audio_full_reforzado
                 self._audio_activo_crudo = y_audio_full_crudo
                 self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
+                self._factor_delta_normalizador_en_vivo = 1.0
                 self.audio_sr = audio_sr
                 self.y_nativo_completo_actual = self.y_audio_full
                 self.offset_entrada_actual = 0.0
@@ -3994,6 +4029,7 @@ class SeamlessMixerEngine(QObject):
                         self.y_audio_full = audio_final
                         self._audio_activo_crudo = audio_final_crudo
                         self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
+                        self._factor_delta_normalizador_en_vivo = 1.0
                         self.audio_sr = sr
                         self.y_mono = y_mono_final
                         self.gain_a = 1.0
@@ -4216,6 +4252,7 @@ class SeamlessMixerEngine(QObject):
                 self.y_audio_full = preparado["y_aligned_stereo"]
                 self._audio_activo_crudo = preparado["y_aligned_stereo_crudo"]
                 self._nivel_db_horneado_actual = float(self.normalizar_nivel_db)
+                self._factor_delta_normalizador_en_vivo = 1.0
                 self.audio_sr = preparado["sr"]
                 self.y_mono = preparado["y_mono_final"]
                 self.y_nativo_completo_actual = preparado["y_next_nativo_completo"]
