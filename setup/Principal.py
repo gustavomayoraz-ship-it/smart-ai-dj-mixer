@@ -2160,6 +2160,14 @@ class WaveformWidget(QWidget):
         # se toca en set_audio_data (tiene que sobrevivir el cambio de
         # tema); clear() sí la resetea (ver más abajo).
         self.fijo_al_inicio_b = False
+        # True desde que se suelta el recuadro del lado B (mousePressEvent
+        # dispara punto_entrada_b_movido) hasta que termina de reanalizarse
+        # en segundo plano y la línea naranja de offset_entrada se vuelve a
+        # calcular para la posición nueva (ver on_punto_entrada_b_movido y
+        # on_preload_analyzed en SmartDJPlayer) -- mientras tanto el
+        # recuadro se pinta de un amarillo más rojizo, avisando que todavía
+        # no está sincronizado con esa línea.
+        self._esperando_sincronizar_b = False
         self.offset_entrada = 0.0
         self.offset_reproduccion_en_grafico = 0.0
         self.factor_tempo_grafico = 1.0
@@ -2528,6 +2536,7 @@ class WaveformWidget(QWidget):
         self._movido_a_mano_b = False
         self.fijo_al_inicio_b = False
         self.kick_marker_time = -1.0
+        self._esperando_sincronizar_b = False
         self.is_active = False
         self.offset_visual_seg = 0.0
         self.offset_entrada = 0.0
@@ -2554,8 +2563,18 @@ class WaveformWidget(QWidget):
         zona = self._zona_mezcla_px()
         if zona is not None:
             mix_x_start, mix_width = zona
-            painter.fillRect(mix_x_start, 0, mix_width, height, QColor(255, 230, 0, 80))
-            painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.SolidLine))
+            if self.is_incoming_deck and self._esperando_sincronizar_b:
+                # Todavía no terminó de reanalizarse la posición nueva (ver
+                # _esperando_sincronizar_b) -- un amarillo más rojizo avisa
+                # que la línea naranja de offset_entrada de abajo no
+                # corresponde todavía a este recuadro.
+                color_relleno = QColor(255, 110, 0, 80)
+                color_borde = QColor(255, 90, 0)
+            else:
+                color_relleno = QColor(255, 230, 0, 80)
+                color_borde = QColor(255, 255, 0)
+            painter.fillRect(mix_x_start, 0, mix_width, height, color_relleno)
+            painter.setPen(QPen(color_borde, 2, Qt.SolidLine))
             painter.drawRect(mix_x_start, 0, mix_width, height - 1)
             if not self.is_incoming_deck:
                 painter.setPen(QPen(QColor(255, 255, 255), 2, Qt.DashLine))
@@ -5294,6 +5313,13 @@ class SmartDJPlayer(QMainWindow):
         self.engine.ruta_offset_entrada_b_forzado = ruta_b
         self.update_status(
             tr("ppal_status_punto_entrada_b").format(seg=f"{offset_segundos:.1f}"))
+        # Avisa visualmente (recuadro más rojizo, ver WaveformWidget.
+        # paintEvent) que la línea naranja de offset_entrada todavía
+        # corresponde a la posición VIEJA -- se apaga en on_preload_analyzed,
+        # cuando termina el reanálisis que dispara _reprocesar_b_debounced
+        # y la línea se recalcula para la posición nueva.
+        self.waveform_next._esperando_sincronizar_b = True
+        self.waveform_next.update()
         self._reprocesar_b_debounced()
 
     def _tiempo_mezcla(self) -> float:
@@ -5567,8 +5593,35 @@ class SmartDJPlayer(QMainWindow):
                     wf.offset_visual_seg = 0.0
                 self.waveform_next.set_progress(pos_b)
                 if self._rectangulo_en_vivo:
-                    if not self._rectangulo_fijo_por_frase:
-                        self.waveform_current.trigger_active_mix_zone(pos_a)
+                    # OJO: acá NO hay que usar pos_a (la posición leída en
+                    # ESTE tick de la GUI) -- si el tick que finalmente "ve"
+                    # is_mixing en True se retrasó un poco (por ejemplo con
+                    # la GUI ocupada analizando otro tema de fondo), pos_a
+                    # ya viene adelantada respecto al instante real en que
+                    # arrancó la mezcla, y el recuadro quedaba congelado
+                    # más adelante de lo que correspondía -- con la línea
+                    # blanca de progreso saliéndose por la derecha en vez
+                    # de quedar adentro, como se ve bien en el Deck B.
+                    # self.engine.offset_arranque_b_en_a es la posición de
+                    # A que el propio motor guardó en el instante EXACTO
+                    # en que is_mixing pasó a True (ver
+                    # start_seamless_transition), así que no depende de en
+                    # qué tick de la GUI se note el cambio.
+                    #
+                    # Tampoco hay que respetar acá _rectangulo_fijo_por_
+                    # frase (que sí aplica mientras la mezcla todavía NO
+                    # arrancó, más abajo, para no reacomodar el recuadro
+                    # que el usuario adelantó a mano con "Siguiente"/
+                    # "Anterior") -- una vez que is_mixing es True de
+                    # verdad, la mezcla YA arrancó en offset_arranque_b_en_a
+                    # sí o sí, así que el recuadro tiene que reflejar ESO,
+                    # lo haya fijado una frase o no. Si no, quedaba
+                    # congelado en la posición vieja (previa al arranque
+                    # real) cuando _frase_ya_en_recuadro() había dado True
+                    # -- que fue justo lo que pasó en este caso.
+                    self.waveform_current.mix_start_seconds = (
+                        self.engine.offset_arranque_b_en_a)
+                    self.waveform_current.update()
                     self._rectangulo_en_vivo = False
             else:
                 self.waveform_next.offset_visual_seg = 0.0
@@ -7087,6 +7140,10 @@ class SmartDJPlayer(QMainWindow):
             downbeat_times=downbeat_times_completo, fase_downbeat=fase_para_b,
             offset_entrada=offset_entrada_b)
         self.waveform_next.is_active = False
+        # La línea naranja de offset_entrada ya quedó recalculada arriba
+        # para la posición actual del recuadro -- se apaga el aviso visual
+        # que prendió on_punto_entrada_b_movido.
+        self.waveform_next._esperando_sincronizar_b = False
         self.waveform_next.update()
 
     def on_mix_started(self, beat_times_completo, phrase_boundaries_completo, bpm_completo,
