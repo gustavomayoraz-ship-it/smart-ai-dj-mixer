@@ -299,6 +299,11 @@ class FilaTemaWidget(QWidget):
         layout.addWidget(self.chk_saltear, 0)
         layout.addWidget(self.lbl_texto, 1)
         layout.addWidget(self.lbl_duracion, 0)
+        # Color de fondo actual (lo necesita paintEvent para pintar la
+        # barra de carga con un tono más claro del mismo color) y la
+        # fracción de "carga" en curso -- ver set_progreso_carga().
+        self._fondo_qcolor = None
+        self._progreso_carga = None
 
     def set_saltear_silencioso(self, valor: bool):
         self.chk_saltear.blockSignals(True)
@@ -306,11 +311,39 @@ class FilaTemaWidget(QWidget):
         self.chk_saltear.blockSignals(False)
 
     def set_color(self, fondo: QColor, texto: QColor):
+        self._fondo_qcolor = QColor(fondo)
         color_fondo = f"rgb({fondo.red()}, {fondo.green()}, {fondo.blue()})"
         color_texto = f"rgb({texto.red()}, {texto.green()}, {texto.blue()})"
         self.setStyleSheet(f"background-color: {color_fondo};")
         self.lbl_texto.setStyleSheet(f"color: {color_texto}; background: transparent;")
         self.lbl_duracion.setStyleSheet(f"color: {color_texto}; background: transparent;")
+
+    def set_progreso_carga(self, fraccion):
+        """fraccion: None para ocultar la barra de "carga" (el estado
+        normal), o un valor 0.0-1.0 que se pinta como un relleno de
+        izquierda a derecha, en un tono más claro del color de fondo de
+        esta fila. Se usa mientras se analiza en segundo plano un tema
+        recién elegido con doble-click (o Play) -- antes, durante ese
+        rato, no había ningún indicio en pantalla de cuánto faltaba (el
+        reproductor se queda sin datos hasta que termina). Ver
+        SmartDJPlayer._iniciar_progreso_carga()/_tick_progreso_carga()."""
+        if self._progreso_carga == fraccion:
+            return
+        self._progreso_carga = fraccion
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._progreso_carga is None or self._fondo_qcolor is None:
+            return
+        fraccion = max(0.0, min(1.0, self._progreso_carga))
+        ancho_relleno = int(round(self.width() * fraccion))
+        if ancho_relleno <= 0:
+            return
+        painter = QPainter(self)
+        painter.fillRect(0, 0, ancho_relleno, self.height(),
+                          self._fondo_qcolor.lighter(145))
+        painter.end()
 
 
 class SeparadorCarpetaWidget(QWidget):
@@ -658,7 +691,7 @@ class VentanaListaSeparada(QWidget):
         # fijo de la ventana principal (ver Principal._alto_ventana_fijo)
         # para que no se pueda achicar por debajo de eso.
         alto_minimo = getattr(player, "_alto_ventana_fijo", 260)
-        self.setMinimumSize(220, alto_minimo)
+        self.setMinimumSize(293, alto_minimo)
         # Clave: sin esto, la ventana ignora el QSS global y queda con
         # el fondo blanco/negro nativo del sistema (que es lo que veías).
         self.setAttribute(Qt.WA_StyledBackground, True)

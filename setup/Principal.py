@@ -4596,6 +4596,25 @@ class SmartDJPlayer(QMainWindow):
         # waveform) -- a 30 veces por segundo el número cambiaba todo el
         # tiempo y se veía nervioso/tembloroso, poco legible.
         self._ultimo_update_nivel_db = 0.0
+        # Barra de "carga" que se pinta sobre la fila de la lista del
+        # tema que se está precargando en el lado B (doble-click sobre
+        # otro tema mientras ya está sonando algo, o la precarga
+        # automática), mientras se analiza en segundo plano -- ver
+        # _iniciar_progreso_carga(),
+        # _tick_progreso_carga() y _detener_progreso_carga(). No hay
+        # progreso REAL disponible (el análisis es un bloque sin
+        # checkpoints intermedios), así que se ESTIMA el tiempo total a
+        # partir de la duración del tema y de un ratio "segundos de
+        # análisis por segundo de audio" que se va afinando solo con
+        # cada tema real que se analiza (arranca en un valor conservador
+        # y se corrige después de la primera vez).
+        self._ratio_analisis_por_seg_audio = 0.08
+        self._progreso_carga_indice = None
+        self._progreso_carga_t_inicio = 0.0
+        self._progreso_carga_duracion_estimada = 1.0
+        self._timer_progreso_carga = QTimer(self)
+        self._timer_progreso_carga.setInterval(60)
+        self._timer_progreso_carga.timeout.connect(self._tick_progreso_carga)
         self._pausa_timestamp = 0.0
         # Posición (en segundos) en la que quedó pausado el tema actual --
         # se actualiza justo antes de pausar (Play/Stop) porque mientras
@@ -4913,11 +4932,16 @@ class SmartDJPlayer(QMainWindow):
         self.combo_modo_carga.hide()
 
     def _posicionar_ventana_inicial(self, config_data):
+        # Al iniciar (programa cerrado del todo y vuelto a abrir) siempre
+        # arranca con el tamaño estándar mínimo, sin importar con qué
+        # ancho se haya cerrado la vez anterior ni si estaba en el modo
+        # "maximizado" casero (_ancho_maximizado/_alternar_maximizado_ancho)
+        # -- intentar reconstruir ese estado al arrancar daba problemas de
+        # geometría (la ventana quedaba deformada). Lo único que se
+        # recuerda entre sesiones es la posición.
         x = config_data.get("ventana_pos_x")
         y = config_data.get("ventana_pos_y")
-        ancho_guardado = config_data.get("ventana_ancho")
-        if ancho_guardado:
-            self.resize(max(self.minimumWidth(), int(ancho_guardado)), 380)
+        self.resize(self.minimumWidth(), 380)
         if x is not None and y is not None:
             punto = QPoint(int(x), int(y))
             rect_ventana = QRect(punto, self.size())
@@ -4939,8 +4963,11 @@ class SmartDJPlayer(QMainWindow):
                     x_final = max(x_final, geo.left())
                     y_final = max(y_final, geo.top())
                     self.move(x_final, y_final)
-                    return
-        self.move(50, 50)
+                    break
+            else:
+                self.move(50, 50)
+        else:
+            self.move(50, 50)
 
     def _crear_lista_separada(self):
         self.lista_separada = VentanaListaSeparada(self)
@@ -4972,14 +4999,13 @@ class SmartDJPlayer(QMainWindow):
         self.lista_separada._moviendo_por_iman = False
 
     def _redimensionar_lista_tamano_inicial(self):
+        # Igual que con la ventana del reproductor (ver
+        # _posicionar_ventana_inicial): ya no se recuerda el tamaño de
+        # una sesión a otra, siempre arranca con el mínimo -- si no,
+        # quedaba con el alto "estirado hasta el fondo" que tenía puesto
+        # el modo maximizado casero del reproductor (ver
+        # _estirar_lista_hasta_el_fondo) al cerrar.
         minimo = self.lista_separada.minimumSize()
-        ancho_guardado = self.config_data.get("lista_ancho")
-        alto_guardado = self.config_data.get("lista_alto")
-        if ancho_guardado is not None and alto_guardado is not None:
-            self.lista_separada.resize(
-                max(minimo.width(), int(ancho_guardado)),
-                max(minimo.height(), int(alto_guardado)))
-            return
         self.lista_separada.resize(minimo.width(), minimo.height())
 
     def _posicionar_lista_pegada_abajo(self):
@@ -5207,6 +5233,13 @@ class SmartDJPlayer(QMainWindow):
             self.next_index = row
             self.update_playlist_colors()
             next_track_path = self.playlist[self.next_index].ruta
+            # Se vacía la bandeja B de una (espectro del tema anterior
+            # que estaba precargado ahí) para que quede "sin datos"
+            # mientras se analiza el nuevo elegido, en vez de seguir
+            # mostrando el espectro viejo como si ya fuera el nuevo.
+            self.waveform_next.clear()
+            self._iniciar_progreso_carga(
+                self.next_index, self.playlist[self.next_index].duracion)
             self.engine.preload_next_track(
                 next_track_path, self._fade_duration_para(self.current_index, self.next_index))
 
@@ -6414,6 +6447,98 @@ class SmartDJPlayer(QMainWindow):
         except ValueError:
             return None
 
+    def _widget_de_fila_pista(self, indice):
+        """Devuelve el FilaTemaWidget (el que tiene set_progreso_carga)
+        de self.playlist[indice], o None si no está visible en ninguna
+        lista ahora mismo (lista separada oculta, fila scrolleada fuera
+        de la ventana no importa -- itemWidget sigue andando igual)."""
+        fila = self._fila_widget_desde_indice(indice)
+        if fila is None:
+            return None
+        item = self.list_widget.item(fila)
+        if item is None:
+            return None
+        return self.list_widget.itemWidget(item)
+
+    def _iniciar_progreso_carga(self, indice, duracion_audio):
+        """Arranca la barra de "carga" sobre la fila de self.playlist[indice]
+        (ver FilaTemaWidget.set_progreso_carga) -- se llama justo antes
+        de preload_next_track() cuando se elige el tema que va a entrar
+        por el lado B (doble-click sobre otro tema mientras ya está
+        sonando algo, en on_item_double_clicked, o la precarga
+        automática en perform_auto_preload). No se usa para el arranque
+        en frío del lado A ni para la restauración de sesión. La
+        duración total se ESTIMA (no hay progreso real disponible) a
+        partir de duracion_audio y del ratio aprendido en
+        _ratio_analisis_por_seg_audio -- ver _tick_progreso_carga() para
+        cómo se corrige ese ratio después."""
+        self._detener_progreso_carga()
+        if not duracion_audio or duracion_audio <= 0:
+            return
+        widget = self._widget_de_fila_pista(indice)
+        if widget is None:
+            return
+        estimado = max(0.3, duracion_audio * self._ratio_analisis_por_seg_audio)
+        self._progreso_carga_indice = indice
+        self._progreso_carga_t_inicio = time.monotonic()
+        self._progreso_carga_duracion_estimada = estimado
+        widget.set_progreso_carga(0.0)
+        self._timer_progreso_carga.start()
+
+    def _tick_progreso_carga(self):
+        if self._progreso_carga_indice is None:
+            self._timer_progreso_carga.stop()
+            return
+        widget = self._widget_de_fila_pista(self._progreso_carga_indice)
+        if widget is None:
+            # La fila ya no está (se filtró con el buscador, se borró el
+            # tema, etc.) -- no tiene sentido seguir animando algo que
+            # no se ve.
+            self._timer_progreso_carga.stop()
+            return
+        transcurrido = time.monotonic() - self._progreso_carga_t_inicio
+        # Tope en 95%: si la estimación se quedó corta, mejor dejarla
+        # "casi lista" esperando a que on_preload_analyzed la cierre de
+        # verdad, en vez de mostrar un 100% mentiroso con la bandeja B
+        # todavía sin datos.
+        fraccion = min(0.98, transcurrido / self._progreso_carga_duracion_estimada)
+        widget.set_progreso_carga(fraccion)
+
+    def _detener_progreso_carga(self, indice_completado=None, duracion_audio=None):
+        """Para el timer y le saca la barra de carga a la fila -- se
+        llama cuando el análisis del lado B termina de verdad
+        (on_preload_analyzed, con indice_completado/duracion_audio para
+        además corregir el ratio aprendido) o cuando hay que abortarla
+        sin que haya terminado nada (Stop, se eligió otro tema para B
+        antes de que termine el anterior, etc, sin esos dos
+        argumentos)."""
+        self._timer_progreso_carga.stop()
+        indice_anterior = self._progreso_carga_indice
+        if indice_anterior is not None:
+            widget = self._widget_de_fila_pista(indice_anterior)
+            if widget is not None:
+                widget.set_progreso_carga(None)
+        if (indice_completado is not None and indice_completado == indice_anterior
+                and duracion_audio and duracion_audio > 0):
+            transcurrido = time.monotonic() - self._progreso_carga_t_inicio
+            ratio_medido = transcurrido / duracion_audio
+            # Suavizado exponencial simple: cada tema real corrige el
+            # ratio aprendido en vez de reemplazarlo de golpe, para que
+            # un tema atípico (muy corto, con mucho que limpiar/afinar)
+            # no desajuste la estimación para el resto del set. Se le da
+            # más peso a la medición nueva que al valor anterior (en vez
+            # de 70/30) para que se ajuste en 1 o 2 temas reales y no
+            # tarde todo un set en acercarse al tiempo real -- total,
+            # el valor no persiste entre sesiones y arranca de nuevo en
+            # el default cada vez. Topado entre 0.01 y 1.0 para que una
+            # medición rara (por ejemplo con la máquina haciendo otra
+            # cosa en paralelo) no deje la estimación disparatada.
+            ratio_medido = float(np.clip(ratio_medido, 0.01, 1.0))
+            self._ratio_analisis_por_seg_audio = float(np.clip(
+                0.4 * self._ratio_analisis_por_seg_audio + 0.6 * ratio_medido,
+                0.01, 1.0))
+        self._progreso_carga_indice = None
+
     def _actualizar_item_pista(self, indice, pista):
         fila = self._fila_widget_desde_indice(indice)
         if fila is None:
@@ -6672,19 +6797,25 @@ class SmartDJPlayer(QMainWindow):
         if self._guardar_config_timer.isActive():
             self._guardar_config_timer.stop()
         self._guardar_estado_reproduccion_actual()
-        if not self.isMaximized():
+        # Solo se recuerda la POSICIÓN entre sesiones -- el ancho y el
+        # estado "maximizado" casero (_ancho_maximizado, ver
+        # _alternar_maximizado_ancho) ya no se guardan: al reabrir el
+        # programa siempre arranca con el tamaño estándar mínimo (ver
+        # _posicionar_ventana_inicial). Si estaba en modo maximizado
+        # casero, se guarda la posición de ANTES de maximizar (no la
+        # posición ya desplazada del modo maximizado).
+        if self._ancho_maximizado and self._geometria_antes_maximizar_ancho is not None:
+            pos = self._geometria_antes_maximizar_ancho.topLeft()
+        else:
             pos = self.pos()
-            self.config_data["ventana_pos_x"] = pos.x()
-            self.config_data["ventana_pos_y"] = pos.y()
-            self.config_data["ventana_ancho"] = self.width()
+        self.config_data["ventana_pos_x"] = pos.x()
+        self.config_data["ventana_pos_y"] = pos.y()
         if self.lista_separada is not None:
             self.config_data["lista_visible"] = self.lista_separada.isVisible()
             self.config_data["lista_lado_pegado"] = self.lista_separada.lado_pegado
             pos_lista = self.lista_separada.pos()
             self.config_data["lista_pos_x"] = pos_lista.x()
             self.config_data["lista_pos_y"] = pos_lista.y()
-            self.config_data["lista_ancho"] = self.lista_separada.width()
-            self.config_data["lista_alto"] = self.lista_separada.height()
         guardar_config_app(self.config_data)
         if self.lista_separada is not None:
             self.lista_separada.hide()
@@ -6928,6 +7059,8 @@ class SmartDJPlayer(QMainWindow):
             clave = (next_track_path, self._tiempo_mezcla())
             if self._preload_disparado_para != clave:
                 self._preload_disparado_para = clave
+                self._iniciar_progreso_carga(
+                    self.next_index, self.playlist[self.next_index].duracion)
                 self.engine.preload_next_track(next_track_path, fade_actual)
         else:
             self.next_index = -1
@@ -6939,6 +7072,9 @@ class SmartDJPlayer(QMainWindow):
                              fade_duration, kick_time_completo, phrase_boundaries_completo,
                              datos_visuales_completo, downbeat_times_completo,
                              fase_downbeat_completo, offset_entrada_b):
+        self._detener_progreso_carga(
+            indice_completado=self.next_index,
+            duracion_audio=(len(y_next_mono_completo) / float(sr)) if sr else None)
         self.analizador_fondo.reanudar()
         fade_para_b = self.waveform_current.fade_duration
         if fade_para_b <= 0:
@@ -7086,6 +7222,13 @@ class SmartDJPlayer(QMainWindow):
         self.next_index = 1 if len(self.playlist) > 1 else -1
         self._preload_disparado_para = None
         self._fade_duration_cache = {}
+        # Si había un análisis en curso (recién le diste Play/doble-click
+        # a un tema y lo frenaste antes de que termine), la generación ya
+        # quedó obsoleta más arriba -- on_main_analyzed de ESE análisis
+        # nunca va a llegar a llamarse, así que la barra de carga se
+        # quedaría pegada a medio llenar en esa fila para siempre si no
+        # se la saca a mano acá.
+        self._detener_progreso_carga()
         self.update_playlist_colors()
         self.btn_play.setText("▶")
         if hasattr(self, "barra_golpe_seco"):
