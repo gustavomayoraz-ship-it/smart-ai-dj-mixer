@@ -147,6 +147,14 @@ CONFIG_POR_DEFECTO = {
     "golpe_seco_potencia_pct": 100.0,
     "orden_considera_energia": False,
     "efectos_intensidad_pct": 50,
+    # Si está en True, al analizarse un tema se detecta dónde termina
+    # el último sonido audible real y el recuadro de mezcla del Deck A
+    # queda limitado a esa duración efectiva -- no se puede arrastrar
+    # hacia los segundos de silencio que muchos temas traen al final.
+    # No recorta el audio en sí, solo el rango del recuadro. Ver
+    # setup/Principal.py (_detectar_fin_sonido y _borde_izq_recuadro_actual)
+    # y el checkbox en Ajustes -> Zona de mezcla.
+    "recortar_silencio_final": True,
     "ordenar_por_tono": True,
     "modo_carga_duplicados": "sin_duplicados",
     "estilo_visual": None,
@@ -638,7 +646,13 @@ def aplicar_estilo_global(app, nombre_estilo: Optional[str] = None) -> Optional[
 # ================================================================
 def _calcular_hilos_analisis(hilos_logicos: int, ram_total_gb: Optional[float]) -> int:
     hilos_analisis = max(1, hilos_logicos - 2)
-    hilos_analisis = min(hilos_analisis, 4)
+    # Antes el tope era 4: en un CPU de 8+ núcleos dejaba la mitad sin
+    # usar y el análisis de una carpeta grande tardaba el doble de lo
+    # necesario (y, al tardar más, la GUI tenía más tiempo para sentirse
+    # trabada por los repintados que dispara cada pista que termina de
+    # analizarse). 8 aprovecha CPUs modernos sin comerse toda la máquina
+    # -- sigue reservando 2 hilos lógicos para la GUI y el audio.
+    hilos_analisis = min(hilos_analisis, 8)
     if ram_total_gb is not None and ram_total_gb < 4:
         hilos_analisis = min(hilos_analisis, 2)
     return hilos_analisis

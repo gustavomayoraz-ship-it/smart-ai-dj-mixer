@@ -96,6 +96,12 @@ DEF_ANCLAJE_ZONA_B           = "downbeat"
 # el del Deck B siempre fijo al principio, sin arrastre.
 DEF_ANCLAJE_DOWNBEAT_AUTOMATICO = True
 DEF_ORDEN_CONSIDERA_ENERGIA  = False
+# Recortar silencio final: al analizar cada tema, se detecta dónde
+# termina el último sonido audible real y el recuadro de mezcla del
+# Deck A queda limitado a esa duración efectiva -- no se puede
+# arrastrar hacia los segundos de silencio que muchos temas traen al
+# final del archivo. No recorta el audio, solo el rango del recuadro.
+DEF_RECORTAR_SILENCIO_FINAL  = True
 
 # --- 🔀 Orden y carga ---
 DEF_ORDENAR_POR_TONO         = True
@@ -1163,12 +1169,27 @@ class ConfiguracionTeclasDialog(QDialog):
         self.chk_orden_energia.setChecked(bool(self.player.config_data.get("orden_considera_energia", DEF_ORDEN_CONSIDERA_ENERGIA)))
         v.addWidget(self.chk_orden_energia)
 
+        self.chk_recortar_silencio = QCheckBox(tr("ajustes_chk_recortar_silencio"))
+        self.chk_recortar_silencio.setToolTip(
+            "Si está tildado, al analizar cada tema se detecta dónde\n"
+            "termina el último sonido audible real, y el recuadro de\n"
+            "mezcla del Deck A queda limitado a esa duración efectiva --\n"
+            "no se puede arrastrar hacia los segundos de silencio que\n"
+            "muchos temas traen al final del archivo.\n\n"
+            "No recorta el audio ni acorta el tema: solo el rango del\n"
+            "recuadro, que es donde el silencio hacía daño al mezclar.")
+        self.chk_recortar_silencio.setChecked(bool(
+            self.player.config_data.get(
+                "recortar_silencio_final", DEF_RECORTAR_SILENCIO_FINAL)))
+        v.addWidget(self.chk_recortar_silencio)
+
         v.addStretch()
 
         self._refrescar_habilitado_anclaje_automatico()
         self.combo_anclaje_zona.currentTextChanged.connect(self._cambiar_anclaje_zona)
         self.chk_anclaje_automatico.toggled.connect(self._cambiar_anclaje_automatico)
         self.chk_orden_energia.toggled.connect(self._cambiar_orden_energia)
+        self.chk_recortar_silencio.toggled.connect(self._cambiar_recortar_silencio)
         return grupo
 
     def _refrescar_habilitado_anclaje_automatico(self):
@@ -2190,6 +2211,16 @@ class ConfiguracionTeclasDialog(QDialog):
             self.player.ordenar_por_tono()
         self._confirmar()
 
+    def _cambiar_recortar_silencio(self, activo):
+        activo = bool(activo)
+        self.player.config_data["recortar_silencio_final"] = activo
+        guardar_config_app(self.player.config_data)
+        try:
+            self.player._recalcular_limite_recuadro_a()
+        except Exception:
+            pass
+        self._confirmar()
+
     def _cambiar_intensidad_efectos(self, valor_pct):
         self.lbl_intensidad_efectos_valor.setText(f"{valor_pct}%")
         self.player.config_data["efectos_intensidad_pct"] = valor_pct
@@ -2374,6 +2405,10 @@ class ConfiguracionTeclasDialog(QDialog):
         self.chk_orden_energia.setChecked(DEF_ORDEN_CONSIDERA_ENERGIA)
         self.chk_orden_energia.blockSignals(False)
         self._cambiar_orden_energia(DEF_ORDEN_CONSIDERA_ENERGIA)
+        self.chk_recortar_silencio.blockSignals(True)
+        self.chk_recortar_silencio.setChecked(DEF_RECORTAR_SILENCIO_FINAL)
+        self.chk_recortar_silencio.blockSignals(False)
+        self._cambiar_recortar_silencio(DEF_RECORTAR_SILENCIO_FINAL)
 
         # --- Golpe seco (activar + potencia; la frecuencia es automática) ---
         self.sel_golpe_seco_potencia.setValue(DEF_GOLPE_SECO_POTENCIA_PCT, disparar=False)

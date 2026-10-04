@@ -1088,6 +1088,15 @@ def _elegir_punto_entrada_b(y_mono, sr, bpm, beat_times, phrase_boundaries, down
     return float(kick_time)
 
 
+# NOTA: la detección de "fin de sonido real" para "Recortar silencio
+# final" se terminó implementando con otro método, más barato, que
+# reaprovecha los peaks ya calculados del waveform en vez de volver a
+# recorrer las muestras crudas -- ver
+# SmartDJPlayer._aplicar_recorte_silencio_a_waveform. (Existió acá una
+# primera versión basada en RMS sobre y_mono que quedó sin usar; se
+# sacó para no mantener dos implementaciones del mismo cálculo.)
+
+
 @dataclass
 class PistaDJ:
     ruta: str
@@ -1993,6 +2002,11 @@ class AnalizadorDeFondoDJ:
         self._cola = queue.PriorityQueue()
         self._contador = itertools.count()
         self._activo = True
+        # Cuántos hilos de self._hilos están en este momento adentro del
+        # try de _procesar (analizando un tema de verdad, no esperando
+        # en la cola) -- ver hay_contencion().
+        self._hilos_ocupados = 0
+        self._lock_contador_ocupados = threading.Lock()
         self._permiso_continuar = threading.Event()
         self._permiso_continuar.set()
         recursos = _detectar_recursos_pc()
@@ -2011,6 +2025,25 @@ class AnalizadorDeFondoDJ:
     def encolar(self, pista, prioridad: int = 1) -> None:
         self._cola.put((prioridad, next(self._contador), pista))
 
+    def re_encolar_con_prioridad(self, pista, prioridad: int = 0) -> None:
+        """Re-encola una pista que YA podría estar en la cola, para
+        subirle la prioridad. Como PriorityQueue no permite cambiar la
+        prioridad de un ítem ya metido, se mete una entrada NUEVA con
+        la prioridad pedida; cuando el worker saque esa entrada, va a
+        ver que la pista ya está en estado 'analizando' o 'listo' y la
+        va a saltear sin reanalizarla -- pero si todavía estaba
+        'pendiente', ahora sale ANTES que el resto de la cola.
+
+        Se usa para darle prioridad al tema que va al Deck B: si el
+        usuario está cargando una carpeta grande, no queremos que el
+        preload del próximo tema espere atrás de 200 análisis que no
+        son urgentes."""
+        if pista is None:
+            return
+        if getattr(pista, "estado_analisis", None) in ("listo", "analizando"):
+            return
+        self._cola.put((prioridad, next(self._contador), pista))
+
     def encolar_lista(self, pistas, prioridad_primera=None) -> None:
         for i, pista in enumerate(pistas):
             prioridad = 0 if (prioridad_primera is not None and i == prioridad_primera) else 1
@@ -2024,6 +2057,17 @@ class AnalizadorDeFondoDJ:
 
     def esta_ocioso(self) -> bool:
         return self._cola.empty()
+
+    def hay_contencion(self) -> bool:
+        """True si ahora mismo hay otros temas analizándose de fondo (los
+        hilos de orden automático/BPM -- ver AnalizadorDeFondoDJ, no el
+        análisis de audio del preload). Se usa para avisarle a la barra
+        de carga del Deck B (ver SmartDJPlayer._iniciar_progreso_carga)
+        que, mientras esto da True, esos hilos le compiten CPU al
+        preload y tardar varias veces más de lo normal es esperable, no
+        un problema -- así puede usar una estimación de tiempo distinta
+        (y aprendida aparte) para ese caso."""
+        return self._hilos_ocupados > 0 or not self._cola.empty()
 
     def _procesar(self) -> None:
         while self._activo:
@@ -2040,6 +2084,8 @@ class AnalizadorDeFondoDJ:
                 continue
             pista.estado_analisis = "analizando"
             self.notificar(pista)
+            with self._lock_contador_ocupados:
+                self._hilos_ocupados += 1
             try:
                 ruta_abs = str(Path(pista.ruta).resolve())
                 st = Path(ruta_abs).stat()
@@ -2096,6 +2142,9 @@ class AnalizadorDeFondoDJ:
             except Exception as e:
                 pista.estado_analisis = "error"
                 print(f"[dj_player] Error analizando '{pista.ruta}': {e}")
+            finally:
+                with self._lock_contador_ocupados:
+                    self._hilos_ocupados -= 1
             self.notificar(pista)
 
     def detener(self) -> None:
@@ -2134,6 +2183,13 @@ class WaveformWidget(QWidget):
         self.kick_marker_time = -1.0
         self.is_active = False
         self.mostrar_zona_mezcla = True
+        # Duración "efectiva" del tema para efectos de mezcla -- si el
+        # usuario activó "Recortar silencio final" en Ajustes, acá queda
+        # el segundo donde termina el último sonido audible real (ver
+        # SmartDJPlayer._aplicar_recorte_silencio_a_waveform); el
+        # recuadro de mezcla no puede pasar de acá. Si es None, se usa
+        # self.duration completa como antes.
+        self.duracion_efectiva = None
         self.anclaje_zona_b = "downbeat"
         # Solo se usa cuando anclaje_zona_b == "downbeat" -- define
         # únicamente la posición por defecto del recuadro cuando todavía
@@ -2165,9 +2221,15 @@ class WaveformWidget(QWidget):
         # en segundo plano y la línea naranja de offset_entrada se vuelve a
         # calcular para la posición nueva (ver on_punto_entrada_b_movido y
         # on_preload_analyzed en SmartDJPlayer) -- mientras tanto el
-        # recuadro se pinta de un amarillo más rojizo, avisando que todavía
-        # no está sincronizado con esa línea.
+        # recuadro "late" en rojo fuerte (ver _iniciar_pulso_sincronizar_b
+        # / paintEvent), avisando con fuerza que todavía no está
+        # sincronizado con esa línea; al terminar vuelve al amarillo
+        # normal.
         self._esperando_sincronizar_b = False
+        # QTimer del latido (se crea recién al usarse, ver
+        # _iniciar_pulso_sincronizar_b) y fase actual de la animación.
+        self._timer_pulso_sync_b = None
+        self._fase_pulso_sync_b = 0.0
         self.offset_entrada = 0.0
         self.offset_reproduccion_en_grafico = 0.0
         self.factor_tempo_grafico = 1.0
@@ -2178,6 +2240,52 @@ class WaveformWidget(QWidget):
     def _tiempo_desde_x(self, x):
         rel_x = max(0.0, min(1.0, x / self.width())) if self.width() > 0 else 0.0
         return rel_x * self.duration
+
+    def _duracion_tope_recuadro(self):
+        """Devuelve la duración real que puede usar el recuadro de
+        mezcla: duracion_efectiva si el usuario activó "Recortar
+        silencio final" y se detectó fin de sonido, o self.duration
+        completa si no. Reemplaza a self.duration en todos los cálculos
+        de posición del recuadro (borde derecho máximo, snap, etc.)."""
+        if self.duracion_efectiva is not None and self.duracion_efectiva > 1.0:
+            return min(self.duracion_efectiva, self.duration)
+        return self.duration
+
+    def _iniciar_pulso_sincronizar_b(self):
+        """Prende el aviso de "esperando sincronizar" del recuadro B y
+        arranca la animación de latido (parpadeo fuerte en rojo, como
+        un corazón) -- mucho más notorio que un color fijo para avisar
+        que hay que esperar a que la línea naranja de offset_entrada se
+        recalcule. Se apaga con _detener_pulso_sincronizar_b, que lo
+        deja en el amarillo normal."""
+        self._esperando_sincronizar_b = True
+        if self._timer_pulso_sync_b is None:
+            self._timer_pulso_sync_b = QTimer(self)
+            # ~25 cuadros/seg: fluido sin recargar la GUI.
+            self._timer_pulso_sync_b.setInterval(40)
+            self._timer_pulso_sync_b.timeout.connect(self._tick_pulso_sync_b)
+        self._fase_pulso_sync_b = 0.0
+        self._timer_pulso_sync_b.start()
+        self.update()
+
+    def _detener_pulso_sincronizar_b(self):
+        """Apaga el aviso de "esperando sincronizar" y para la animación
+        del latido -- el recuadro vuelve al amarillo normal en el
+        próximo repintado."""
+        self._esperando_sincronizar_b = False
+        if self._timer_pulso_sync_b is not None:
+            self._timer_pulso_sync_b.stop()
+        self.update()
+
+    def _tick_pulso_sync_b(self):
+        """Un paso de la animación de latido: avanza la fase y pide un
+        repintado. paintEvent usa self._fase_pulso_sync_b para calcular
+        la intensidad del rojo en ese instante (ver ahí)."""
+        # Velocidad del latido: ~1.8 ciclos/seg -- rápido y notorio,
+        # como un corazón acelerado, sin llegar a ser un parpadeo que
+        # moleste a la vista.
+        self._fase_pulso_sync_b += 0.45
+        self.update()
 
     def downbeat_mas_cercano(self, tiempo_objetivo):
         if len(self.downbeat_times) == 0:
@@ -2279,6 +2387,7 @@ class WaveformWidget(QWidget):
             self.anclaje_zona_b == "downbeat"
             and self.anclaje_downbeat_automatico)
 
+        duracion_tope = self._duracion_tope_recuadro()
         if self.is_incoming_deck:
             if self.mix_start_seconds_b < 0:
                 if automatico_downbeat:
@@ -2306,7 +2415,10 @@ class WaveformWidget(QWidget):
         elif self.mix_start_seconds >= 0:
             mix_x_start = int((self.mix_start_seconds / self.duration) * width)
         else:
-            mix_x_start = width - mix_width
+            # Por defecto: pegado al final de la zona con sonido real,
+            # no al final del archivo (que puede tener silencio).
+            mix_x_start = int(((duracion_tope - self.fade_duration) / self.duration) * width)
+            mix_x_start = max(0, min(mix_x_start, width - mix_width))
 
         return mix_x_start, mix_width
 
@@ -2354,6 +2466,11 @@ class WaveformWidget(QWidget):
             nuevo_x = event.position().x() - self._offset_arrastre_zona
             nuevo_x = max(0, min(nuevo_x, width - mix_width))
             centro_tiempo = ((nuevo_x + mix_width / 2.0) / width) * self.duration
+            # Para el límite del recuadro del Deck A, usamos el tope
+            # efectivo (sin el silencio final si el usuario activó
+            # "Recortar silencio final"). El Deck B no se limita: su
+            # propio anclaje ya maneja dónde arranca, y "acortar el
+            # inicio" no aplica al mismo problema.
             if self.is_incoming_deck:
                 # "Pegado al principio": si el borde izquierdo (antes de
                 # enganchar a ninguna frase) quedó adentro de este margen,
@@ -2384,13 +2501,14 @@ class WaveformWidget(QWidget):
                 # (sin el re-enganche a downbeat que había antes, que en
                 # los hechos lo alejaba de la frase real); en "Downbeat"
                 # se mueve suave, sin ningún snap, a cualquier posición.
+                duracion_tope = self._duracion_tope_recuadro()
                 if self.anclaje_zona_b == "frase" and len(self.phrase_boundaries) > 0:
                     frase_centro = self.frase_mas_cercana(centro_tiempo)
                     nuevo_borde_izq = max(0.0, frase_centro - self.fade_duration / 2.0)
-                    nuevo_borde_izq = min(nuevo_borde_izq, self.duration - self.fade_duration)
+                    nuevo_borde_izq = min(nuevo_borde_izq, duracion_tope - self.fade_duration)
                 else:
                     nuevo_borde_izq = max(0.0, centro_tiempo - self.fade_duration / 2.0)
-                    nuevo_borde_izq = min(nuevo_borde_izq, self.duration - self.fade_duration)
+                    nuevo_borde_izq = min(nuevo_borde_izq, duracion_tope - self.fade_duration)
                 self.mix_start_seconds = nuevo_borde_izq
                 self._movido_a_mano = True
                 self.zona_mezcla_movida.emit(nuevo_borde_izq / self.duration)
@@ -2537,6 +2655,8 @@ class WaveformWidget(QWidget):
         self.fijo_al_inicio_b = False
         self.kick_marker_time = -1.0
         self._esperando_sincronizar_b = False
+        if self._timer_pulso_sync_b is not None:
+            self._timer_pulso_sync_b.stop()
         self.is_active = False
         self.offset_visual_seg = 0.0
         self.offset_entrada = 0.0
@@ -2565,11 +2685,16 @@ class WaveformWidget(QWidget):
             mix_x_start, mix_width = zona
             if self.is_incoming_deck and self._esperando_sincronizar_b:
                 # Todavía no terminó de reanalizarse la posición nueva (ver
-                # _esperando_sincronizar_b) -- un amarillo más rojizo avisa
-                # que la línea naranja de offset_entrada de abajo no
-                # corresponde todavía a este recuadro.
-                color_relleno = QColor(255, 110, 0, 80)
-                color_borde = QColor(255, 90, 0)
+                # _esperando_sincronizar_b) -- "late" en rojo fuerte, como
+                # un corazón, para que sea imposible no notar que hay que
+                # esperar a que la línea naranja de offset_entrada de abajo
+                # se recalcule para este recuadro. La intensidad sube y
+                # baja con self._fase_pulso_sync_b (ver _tick_pulso_sync_b).
+                pulso = 0.5 + 0.5 * np.sin(self._fase_pulso_sync_b)
+                alpha_relleno = int(70 + 90 * pulso)     # 70..160
+                brillo_borde = int(150 + 105 * pulso)    # 150..255
+                color_relleno = QColor(255, 0, 0, alpha_relleno)
+                color_borde = QColor(brillo_borde, 0, 0)
             else:
                 color_relleno = QColor(255, 230, 0, 80)
                 color_borde = QColor(255, 255, 0)
@@ -2928,6 +3053,30 @@ class SeamlessMixerEngine(QObject):
         self._timer_normalizador_en_vivo = QTimer(self)
         self._timer_normalizador_en_vivo.setSingleShot(True)
         self._timer_normalizador_en_vivo.timeout.connect(self.reaplicar_normalizador_en_vivo)
+        # Worker único de recálculo del buffer de normalización (ver
+        # _worker_recalculo_normalizador): con "el último valor gana",
+        # para no apilar recálculos de millones de muestras que
+        # saturaban la CPU y producían micro-cortes de audio.
+        self._lock_worker_normalizador = threading.Lock()
+        self._worker_normalizador_activo = False
+        self._nivel_pendiente_normalizador = None
+        # Único QTimer reutilizable para animar el volumen del canal A
+        # (ver _animar_volumen_canal_a / _tick_anim_volumen): antes se
+        # creaba uno nuevo en cada movimiento del slider.
+        self._timer_anim_volumen = None
+        self._estado_anim_volumen = None
+        # Reforzador periódico de la corrección del normalizador: cada
+        # 500 ms, si hay una corrección pendiente y el canal A está
+        # sonando, se reaplica el volumen correcto (por si algún otro
+        # camino lo hubiera pisado sin querer). Es barato (solo un
+        # set_volume) y garantiza que el cambio del slider del
+        # normalizador se mantenga aplicado durante toda la
+        # reproducción, sin depender de que nadie toque el canal A.
+        self._timer_refuerzo_normalizador = QTimer(self)
+        self._timer_refuerzo_normalizador.setInterval(500)
+        self._timer_refuerzo_normalizador.timeout.connect(
+            self._reforzar_normalizador_en_vivo)
+        self._timer_refuerzo_normalizador.start()
         self._generacion_reproduccion = 0
         self._restaurar_tempo_pendiente = None
         self._lock_restaurar_tempo = threading.Lock()
@@ -2959,27 +3108,28 @@ class SeamlessMixerEngine(QObject):
     def reaplicar_normalizador_en_vivo(self) -> None:
         """Aplica el cambio de nivel del normalizador en vivo.
 
-        IMPORTANTE (v3): el recálculo del buffer se hace en un hilo de
-        fondo, NO en el hilo principal de Qt. Antes se hacía acá mismo
-        y bloqueaba la ventana 200-500 ms cada vez que tocabas el
-        slider -> se sentía como congelamiento.
+        IMPORTANTE (v4): además de correr en hilo de fondo (como en v3),
+        ahora el recálculo del buffer completo NO se puede apilar. Antes
+        cada movimiento del slider disparaba un hilo nuevo que recalculaba
+        millones de muestras (filtfilt + log10 + power); con movimientos
+        rápidos se juntaban 2-3 recálculos en paralelo, la CPU se
+        saturaba y el hilo de audio de pygame perdía su quantum de tiempo
+        -> micro-cortes audibles.
 
         Cómo funciona ahora:
 
-        1. Se calcula el volumen objetivo del canal que está sonando y se
-           anima suavemente (esto es rápido, no bloquea). OJO: el buffer
-           que está sonando ya tiene horneada la ganancia correspondiente
-           a self._nivel_db_horneado_actual (el nivel que estaba activo
-           cuando se armó ese buffer), así que el ajuste inmediato tiene
-           que ser la diferencia entre el nivel nuevo y ese nivel horneado
-           -- no el nivel nuevo "a secas", porque eso aplicaría la
-           corrección dos veces (una ya horneada en las muestras, otra de
-           golpe en el volumen del canal).
-        2. Se lanza un hilo de fondo que recalcula el buffer completo
-           con el nivel nuevo y lo deja guardado para el próximo seek
-           o cambio de tema. Si mientras tanto movés el slider otra
-           vez, el recálculo viejo se cancela y se hace solo el último.
-        """
+        1. Se calcula el volumen objetivo del canal que está sonando y
+           se anima suavemente (rápido, no bloquea).
+
+        2. El recálculo pesado del buffer lo hace SIEMPRE el mismo
+           worker de fondo, con "el último valor gana": si mientras
+           recalcula llega un valor nuevo, se descarta el que estaba
+           haciendo y se recalcula con el nuevo. Nada de recálculos
+           apilados, nada de CPUs saturadas.
+
+        3. Ese worker corre con prioridad BAJA (BELOW_NORMAL en
+           Windows) para que el hilo de audio de pygame siempre gane
+           cuando compiten por CPU."""
         if self.is_mixing:
             return
 
@@ -2987,110 +3137,230 @@ class SeamlessMixerEngine(QObject):
         if crudo is None:
             return
 
-        # --- Ajuste de volumen INMEDIATO (no bloquea nada) ---
+        # --- Ajuste de volumen INMEDIATO (directo, sin animación) ---
+        # Antes se animaba en 400 ms; el problema es que cualquier
+        # llamada a set_master_volume() que llegara en el medio pisaba
+        # el valor animado, y si el usuario no tocaba nada más la
+        # corrección se perdía al terminar la animación. Ahora se aplica
+        # directo: el slider responde al instante, y la corrección vive
+        # en _factor_delta_normalizador_en_vivo (que set_master_volume
+        # ya respeta) más el reaplicador periódico de abajo.
         try:
             if self.chan_a.get_busy():
                 nivel_db_objetivo = float(self.normalizar_nivel_db)
                 nivel_db_horneado = self._nivel_db_horneado_actual
                 if nivel_db_horneado is None:
                     nivel_db_horneado = nivel_db_objetivo
-                # Diferencia respecto de lo que YA está horneado en el
-                # buffer que está sonando -- ver docstring.
                 delta_db = nivel_db_objetivo - nivel_db_horneado
                 factor_delta = 10.0 ** (delta_db / 20.0)
-                # Se guarda para que set_master_volume (y cualquier otro
-                # lugar que reconstruya el volumen de A) lo respete en vez
-                # de pisarlo -- ver el comentario en __init__.
+                # Tope seguro del factor: por debajo de 0.15 pediríamos
+                # una atenuación tan brutal que el tema se escucharía
+                # casi mudo (y en la práctica el slider ya no daría más
+                # -- recordemos que el buffer horneado ya viene con su
+                # propia ganancia). Por encima de 4.0 (~12 dB) el boost
+                # es tan grande que seguro se topea en el canal, y el
+                # buffer recalculado en el fondo se encarga igual -- no
+                # tiene sentido pedir más.
+                factor_delta = float(np.clip(factor_delta, 0.15, 4.0))
                 self._factor_delta_normalizador_en_vivo = factor_delta
                 vol_sin_tope = self.gain_a * self.master_volume * factor_delta
+                # Aviso cuando el pedido se topetea en pygame -- así
+                # queda claro en consola que el slider llegó a su tope
+                # útil (por límite del backend de audio, no del código).
+                if vol_sin_tope > 1.0:
+                    print(f"[normalizador] Aviso: pedido "
+                          f"{nivel_db_objetivo:+.1f} dB -> factor "
+                          f"{factor_delta:.2f} -> volumen teórico "
+                          f"{vol_sin_tope:.2f} > 1.0 (topeteado en 1.0 "
+                          f"por pygame). El boost completo se aplicará "
+                          f"en el próximo seek o cambio de tema.")
                 vol_objetivo = float(np.clip(vol_sin_tope, 0.0, 1.0))
-                # Diagnóstico temporal: si vol_sin_tope > 1.0, el volumen
-                # del canal (que pygame limita duro a 1.0, sin la rampa
-                # suave que sí tiene el refuerzo del buffer horneado)
-                # se está topando ahí y el aumento pedido no se escucha
-                # completo -- a diferencia del próximo tema (B), que
-                # recibe el refuerzo horneado directo en las muestras.
-                print(f"[normalizador-live] objetivo={nivel_db_objetivo:.1f}dB "
-                      f"horneado={nivel_db_horneado:.1f}dB delta={delta_db:+.1f}dB "
-                      f"gain_a={self.gain_a:.3f} master_volume={self.master_volume:.3f} "
-                      f"vol_sin_tope={vol_sin_tope:.3f} vol_objetivo={vol_objetivo:.3f}"
-                      f"{' <-- TOPADO EN 1.0' if vol_sin_tope > 1.0 else ''}")
-                self._animar_volumen_canal_a(vol_objetivo)
+                self.chan_a.set_volume(vol_objetivo)
+                # Dejamos el estado de la animación apuntando al mismo
+                # valor final, por si el tick de la animación llegara a
+                # dispararse después y quisiera pisar este valor.
+                self._estado_anim_volumen = {
+                    "paso": 20, "vol_inicial": vol_objetivo,
+                    "vol_objetivo": vol_objetivo, "pasos": 20,
+                }
+                if hasattr(self, "_timer_anim_volumen") and self._timer_anim_volumen is not None:
+                    self._timer_anim_volumen.stop()
         except Exception as e:
             print(f"[normalizador] Aviso: falló el ajuste de volumen en vivo: {e}")
 
-        # --- Recálculo del buffer en HILO DE FONDO (sin bloquear) ---
-        generacion_actual = getattr(self, "_generacion_normalizador", 0) + 1
-        self._generacion_normalizador = generacion_actual
-        activo = bool(self.normalizar_activo)
-        nivel = float(self.normalizar_nivel_db)
-        sr = self.audio_sr
+        # --- Recálculo del buffer: worker único con "último gana" ---
+        # Guardamos el nivel pedido y avisamos al worker que hay trabajo
+        # nuevo. Si ya está recalculando, no lo interrumpimos: cuando
+        # termine, va a ver este pedido nuevo y recalcular. Así nunca
+        # hay más de UN recálculo en paralelo.
+        self._nivel_pendiente_normalizador = (
+            bool(self.normalizar_activo), float(self.normalizar_nivel_db))
+        with self._lock_worker_normalizador:
+            if not self._worker_normalizador_activo:
+                self._worker_normalizador_activo = True
+                threading.Thread(
+                    target=self._worker_recalculo_normalizador,
+                    daemon=True,
+                    name="WorkerNormalizador",
+                ).start()
 
-        def _recalcular_en_fondo():
+    def _worker_recalculo_normalizador(self) -> None:
+        """Worker único de recálculo del buffer de normalización. Toma
+        el último nivel pedido, recalcula, y si mientras tanto llegó
+        otro pedido, repite con ese. Se apaga solo cuando no hay más
+        trabajo pendiente.
+
+        Corre con prioridad BAJA en Windows (BELOW_NORMAL_PRIORITY_CLASS)
+        para que el hilo de audio de pygame siempre tenga preferencia
+        cuando compiten por CPU -- es la diferencia entre "el slider
+        responde con un pequeño delay" y "se escuchan micro-cortes"."""
+        # Bajar la prioridad de ESTE hilo en Windows. En otros SO no
+        # hace nada (no hay equivalente simple y confiable), pero el
+        # resto del fix (worker único, no apilar) ya ayuda mucho igual.
+        try:
+            if sys.platform == "win32":
+                THREAD_PRIORITY_BELOW_NORMAL = -1
+                handle = ctypes.windll.kernel32.GetCurrentThread()
+                ctypes.windll.kernel32.SetThreadPriority(
+                    handle, THREAD_PRIORITY_BELOW_NORMAL)
+        except Exception:
+            pass
+
+        while True:
+            with self._lock_worker_normalizador:
+                pedido = getattr(self, "_nivel_pendiente_normalizador", None)
+                if pedido is None:
+                    # No hay nada para hacer: nos apagamos. Si llega un
+                    # pedido nuevo, reaplicar_normalizador_en_vivo() va a
+                    # arrancar otro worker (nunca hay más de uno a la vez).
+                    self._worker_normalizador_activo = False
+                    return
+                self._nivel_pendiente_normalizador = None
+
+            activo, nivel = pedido
+            crudo = self._audio_activo_crudo
+            if crudo is None:
+                continue
+
             try:
                 nuevo, _envolvente = _reforzar_con_normalizador_dinamico(
-                    crudo, sr, activo, nivel)
+                    crudo, self.audio_sr, activo, nivel)
             except Exception as e:
                 print(f"[normalizador] Aviso: falló el recálculo del buffer: {e}")
-                return
-            # Si mientras tanto se movió el slider otra vez, este
-            # recálculo quedó obsoleto: lo descartamos para no pisar
-            # uno más nuevo con uno viejo.
-            if getattr(self, "_generacion_normalizador", 0) != generacion_actual:
-                return
-            # Guardamos el buffer nuevo listo para el próximo seek /
-            # cambio de tema -- el audio en vivo no se reemplaza acá, así
-            # que self._nivel_db_horneado_actual (lo que está SONANDO de
-            # verdad en este momento) queda sin tocar a propósito: si el
-            # usuario mueve el slider de nuevo antes del próximo seek, el
-            # ajuste inmediato tiene que seguir midiéndose contra lo que
-            # hay realmente horneado en las muestras que están sonando,
-            # no contra este recálculo todavía no aplicado.
-            self.y_audio_full = nuevo
-            self.y_mono = None  # se recalcula al vuelo si hace falta
+                continue
 
-        threading.Thread(target=_recalcular_en_fondo, daemon=True).start()
+            # Chequeo de "¿mientras tanto llegó otro pedido?": si sí,
+            # este resultado ya quedó obsoleto (el nivel pedido cambió
+            # de nuevo mientras recalculábamos) y lo descartamos sin
+            # aplicarlo -- el bucle vuelve arriba y recalcula directo
+            # con el pedido más nuevo. Así nunca se aplica un resultado
+            # viejo por encima de uno más actual.
+            with self._lock_worker_normalizador:
+                hay_pedido_nuevo = getattr(
+                    self, "_nivel_pendiente_normalizador", None) is not None
+            if not hay_pedido_nuevo:
+                self.y_audio_full = nuevo
+                self.y_mono = None
+                continue
+
+    def _reforzar_normalizador_en_vivo(self) -> None:
+        """Reaplica cada 500 ms el volumen correcto del canal A, por si
+        algún otro camino (set_master_volume desde el slider del
+        volumen maestro, el swap de buffer al hacer seek, etc.) lo
+        hubiera pisado sin tener en cuenta el factor delta del
+        normalizador. Es una operación barata (solo un set_volume), pero
+        garantiza que el efecto del slider del normalizador se mantenga
+        audible durante toda la reproducción.
+
+        No hace nada si:
+          - El canal A no está sonando.
+          - No hay una corrección pendiente
+            (_factor_delta_normalizador_en_vivo == 1.0).
+          - El motor está en medio de una mezcla (ahí el volumen lo
+            maneja el fade, y no queremos interferir)."""
+        try:
+            if self.is_mixing:
+                return
+            if not self.chan_a.get_busy():
+                return
+            factor = float(getattr(
+                self, "_factor_delta_normalizador_en_vivo", 1.0))
+            if abs(factor - 1.0) < 1e-3:
+                return
+            # Mismo tope seguro que en reaplicar_normalizador_en_vivo:
+            # si el factor sale del rango razonable, no tiene sentido
+            # pedirle a pygame un volumen imposible.
+            factor = float(np.clip(factor, 0.15, 4.0))
+            vol_correcto = float(np.clip(
+                self.gain_a * self.master_volume * factor, 0.0, 1.0))
+            vol_actual = float(self.chan_a.get_volume())
+            # Solo aplicamos si el volumen actual difiere del correcto
+            # en más de un 1% (evita un set_volume constante sin motivo).
+            if abs(vol_actual - vol_correcto) > 0.01 * max(0.01, vol_correcto):
+                self.chan_a.set_volume(vol_correcto)
+        except Exception:
+            pass
 
     def _animar_volumen_canal_a(self, vol_objetivo: float):
         """Anima el volumen del canal A desde su valor actual hasta
         vol_objetivo, en pasos cortos, sin bloquear el hilo de Qt.
 
-        Se usa un QTimer de un solo disparo que se reprograma a sí mismo
-        en cada paso. A diferencia de un bucle con time.sleep(), esto
-        deja que la ventana siga respondiendo normalmente."""
+        IMPORTANTE (v4): se usa UN ÚNICO QTimer reutilizable, en vez de
+        crear uno nuevo en cada llamada. Con movimientos rápidos del
+        slider, antes se acumulaban decenas de QTimers animando el
+        volumen en paralelo (basura + competencia con el hilo de GUI);
+        ahora hay uno solo, y cada llamada simplemente reinicia la
+        animación con el nuevo objetivo."""
         pasos = 20
-        duracion_total_ms = 400
-        intervalo_ms = max(1, duracion_total_ms // pasos)
+        intervalo_ms = 20  # 20 pasos * 20 ms = 400 ms total, igual que antes
 
         try:
             vol_inicial = float(self.chan_a.get_volume())
         except Exception:
             vol_inicial = float(self.master_volume)
 
-        estado = {"paso": 0}
+        self._estado_anim_volumen = {
+            "paso": 0,
+            "vol_inicial": vol_inicial,
+            "vol_objetivo": float(vol_objetivo),
+            "pasos": pasos,
+        }
 
-        def _tick():
+        if not hasattr(self, "_timer_anim_volumen"):
+            self._timer_anim_volumen = QTimer(self)
+            self._timer_anim_volumen.setInterval(intervalo_ms)
+            self._timer_anim_volumen.timeout.connect(self._tick_anim_volumen)
+        self._timer_anim_volumen.stop()
+        self._timer_anim_volumen.start()
+
+    def _tick_anim_volumen(self) -> None:
+        """Un paso de la animación de volumen del canal A. Se reprograma
+        solo (o se detiene al terminar). Ver _animar_volumen_canal_a()."""
+        estado = getattr(self, "_estado_anim_volumen", None)
+        if estado is None:
             try:
-                if not self.chan_a.get_busy():
-                    timer.stop()
-                    return
-                estado["paso"] += 1
-                t = min(1.0, estado["paso"] / pasos)
-                peso = 0.5 - 0.5 * np.cos(np.pi * t)
-                vol_actual = vol_inicial + (vol_objetivo - vol_inicial) * float(peso)
-                self.chan_a.set_volume(float(np.clip(vol_actual, 0.0, 1.0)))
-                if estado["paso"] >= pasos:
-                    timer.stop()
+                self._timer_anim_volumen.stop()
             except Exception:
-                try:
-                    timer.stop()
-                except Exception:
-                    pass
+                pass
+            return
+        try:
+            if not self.chan_a.get_busy():
+                self._timer_anim_volumen.stop()
+                return
+            estado["paso"] += 1
+            t = min(1.0, estado["paso"] / estado["pasos"])
+            peso = 0.5 - 0.5 * np.cos(np.pi * t)
+            vol_actual = estado["vol_inicial"] + (
+                estado["vol_objetivo"] - estado["vol_inicial"]) * float(peso)
+            self.chan_a.set_volume(float(np.clip(vol_actual, 0.0, 1.0)))
+            if estado["paso"] >= estado["pasos"]:
+                self._timer_anim_volumen.stop()
+        except Exception:
+            try:
+                self._timer_anim_volumen.stop()
+            except Exception:
+                pass
 
-        timer = QTimer(self)
-        timer.setInterval(intervalo_ms)
-        timer.timeout.connect(_tick)
-        timer.start()
     def set_rampa_tempo(self, segundos: float) -> None:
         self.rampa_tempo_seg = float(np.clip(segundos, 0.0, 15.0))
 
@@ -3121,7 +3391,15 @@ class SeamlessMixerEngine(QObject):
             self.intensidad_efectos_pct = float(np.clip(intensidad_pct, 10.0, 100.0))
 
     def set_master_volume(self, val_percent):
-        self.master_volume = val_percent / 100.0
+        # Mapeo con MARGEN: el slider 0-100% se traduce internamente a un
+        # factor 0.0-0.85, no 0.0-1.0. Así queda un 15% de headroom
+        # reservado para que las correcciones del normalizador no
+        # empujen el producto final por encima de 1.0 tan fácilmente, y
+        # el slider del volumen maestro sigue respondiendo en todo su
+        # rango en vez de quedar topeteado arriba de la mitad.
+        MARGEN_MASTER = 0.85
+        val_percent = max(0, min(100, int(val_percent)))
+        self.master_volume = (val_percent / 100.0) * MARGEN_MASTER
         if not self.is_mixing:
             if self.chan_a.get_busy():
                 # OJO: hay que respetar acá la corrección EN VIVO del
@@ -3129,13 +3407,21 @@ class SeamlessMixerEngine(QObject):
                 # no, tocar el volumen maestro (aunque sea un toque
                 # mínimo) pisaba esa corrección y la volvía a dejar en lo
                 # que ya estaba horneado, como si el slider del
-                # normalizador no hubiera hecho nada. Ver el comentario en
-                # __init__ y en reaplicar_normalizador_en_vivo.
-                self.chan_a.set_volume(float(np.clip(
-                    self.gain_a * self.master_volume
-                    * self._factor_delta_normalizador_en_vivo, 0.0, 1.0)))
+                # normalizador no hubiera hecho nada.
+                factor_norm = float(getattr(
+                    self, "_factor_delta_normalizador_en_vivo", 1.0))
+                vol_sin_tope = self.gain_a * self.master_volume * factor_norm
+                if vol_sin_tope > 1.0:
+                    # pygame topea el volumen del canal a 1.0 -- cuando
+                    # el pedido lo supera, el volumen real queda igual
+                    # aunque el número de la UI siga subiendo. Avisamos
+                    # para que se sepa que es límite del backend, no un
+                    # bug del código.
+                    pass
+                self.chan_a.set_volume(float(np.clip(vol_sin_tope, 0.0, 1.0)))
             if self.chan_b.get_busy():
-                self.chan_b.set_volume(float(np.clip(self.gain_b * self.master_volume, 0.0, 1.0)))
+                vol_b_sin_tope = self.gain_b * self.master_volume
+                self.chan_b.set_volume(float(np.clip(vol_b_sin_tope, 0.0, 1.0)))
 
     def nivel_golpe_seco_en_vivo(self, pos_segundos, audio=None, sr=None, clave="a"):
         """Nivel de la TRANSIENTE de bombo (banda 60-120 Hz), medido en la
@@ -3333,15 +3619,21 @@ class SeamlessMixerEngine(QObject):
             self.gain_a = 1.0
             if mudo_inicial:
                 # Comportamiento para _iniciar_restauracion_reproduccion:
-                # arranca ya con el audio crudo, en silencio (el llamador
-                # pone el volumen en 0 enseguida) -- apenas termine el
-                # análisis de fondo, on_main_analyzed salta a la posición
-                # guardada de la sesión anterior y ahí sí sube el volumen
-                # real. Como nunca se llega a escuchar, no importa que
-                # sea el audio sin normalizar todavía.
-                self.current_sound_a = pygame.mixer.Sound(file_path)
+                # arranca un buffer de SILENCIO puro, no el archivo real.
+                # Antes se hacía chan_a.play(Sound(file_path)) con el
+                # archivo crudo y el volumen se bajaba a 0 DESPUÉS --
+                # resultado: un "play y corta" audible de ~100 ms a
+                # volumen pleno, apenas se abría el reproductor.
+                #
+                # Ahora el silencio arranca a volumen 0 desde el primer
+                # instante, y cuando el análisis de fondo termina,
+                # seek_main_track() reemplaza ese silencio por el buffer
+                # procesado en la posición guardada -- sin ningún
+                # destello audible mientras tanto.
+                silencio = np.zeros((4410, 2), dtype=np.int16)  # 100 ms
+                self.current_sound_a = pygame.sndarray.make_sound(silencio)
+                self.chan_a.set_volume(0.0)
                 self.chan_a.play(self.current_sound_a)
-                self.chan_a.set_volume(float(np.clip(self.gain_a * self.master_volume, 0.0, 1.0)))
                 self.start_time_a = time.monotonic()
             else:
                 self.start_time_a = 0.0
@@ -3442,7 +3734,16 @@ class SeamlessMixerEngine(QObject):
 
         threading.Thread(target=_analizar_en_fondo, daemon=True).start()
 
-    def seek_main_track(self, target_seconds):
+    def seek_main_track(self, target_seconds, dejar_pausado=False):
+        """Salta a target_seconds en el tema actual del Deck A.
+
+        dejar_pausado (nuevo): si es True, además del seek deja el canal
+        A pausado INMEDIATAMENTE después del swap del buffer -- sin
+        ventana entre el play() y el pause(), así el swap no se
+        escucha. Se usa en la restauración de sesión cuando el estado
+        guardado era "pausado": sin esto, el seek "revivía" la
+        reproducción por detrás aunque el código creyera que seguía en
+        pausa."""
         if self.is_mixing or self.y_audio_full is None:
             return
         try:
@@ -3489,6 +3790,14 @@ class SeamlessMixerEngine(QObject):
                 # pausa -- stop()+play() sin nada en el medio.
                 self.current_sound_a = nuevo_sonido
                 self.chan_a.play(self.current_sound_a)
+                if dejar_pausado:
+                    # Pausar INMEDIATAMENTE después del play, en la
+                    # misma operación -- así no hay ventana entre el
+                    # swap del buffer y la pausa, y no se escucha nada.
+                    try:
+                        pygame.mixer.pause()
+                    except Exception:
+                        pass
             finally:
                 self._chan_a_en_swap_momentaneo = False
             self.chan_a.set_volume(float(np.clip(self.gain_a * self.master_volume, 0.0, 1.0)))
@@ -4664,10 +4973,46 @@ class SmartDJPlayer(QMainWindow):
         # análisis por segundo de audio" que se va afinando solo con
         # cada tema real que se analiza (arranca en un valor conservador
         # y se corrige después de la primera vez).
-        self._ratio_analisis_por_seg_audio = 0.08
+        #
+        # DOS ratios en vez de uno: cuando self.analizador_fondo tiene
+        # otros temas analizándose de fondo (orden automático/BPM, hasta
+        # 8 hilos -- ver AnalizadorDeFondoDJ.hay_contencion), esos hilos
+        # le compiten CPU a este preload y tarda bastante más que cuando
+        # corre solo. Mezclar ambos casos en un único ratio aprendido
+        # lo dejaba mal calibrado para los dos (muy optimista cuando hay
+        # contención -- la barra llegaba al tope mucho antes de que el
+        # tema estuviera listo de verdad -- y de más cuando no la hay).
+        # Cada uno se corrige solo, por separado, con las mediciones
+        # reales de cada caso (ver _detener_progreso_carga). El de
+        # "ocupado" arranca con un valor conservador (más alto) como
+        # primera estimación hasta tener una medición real propia.
+        # Valores de arranque ajustados con mediciones reales (ver los
+        # diagnósticos [progreso-carga]): sin contención el análisis
+        # terminó tardando siempre entre 0.11 y 0.14 seg por cada seg
+        # de audio, nunca cerca de 0.08 -- con ese default la barra
+        # llegaba al tope muuucho antes de que el tema estuviera listo
+        # en TODA la primera precarga de cada sesión (el ratio no se
+        # guarda entre sesiones, así que ese primer tema siempre pifiaba
+        # fuerte aunque los siguientes se fueran corrigiendo solos).
+        self._ratio_analisis_por_seg_audio_libre = 0.13
+        self._ratio_analisis_por_seg_audio_ocupado = 0.30
         self._progreso_carga_indice = None
         self._progreso_carga_t_inicio = 0.0
         self._progreso_carga_duracion_estimada = 1.0
+        self._progreso_carga_estaba_ocupado = False
+        # Duración de audio que se usó para calcular la estimación de
+        # ESTE preload (ver _iniciar_progreso_carga) -- se guarda para
+        # poder detectar, cuando termina, si la duración real
+        # (_detener_progreso_carga) resultó muy distinta. Pasa cuando un
+        # segundo preload pisa a este antes de que termine (otro
+        # doble-click, o la precarga automática recalculando next_index)
+        # y la medición que llega después queda mezclada entre dos temas
+        # distintos, o directamente cuando el tag del archivo mentía la
+        # duración real (típico en mp3 VBR sin header Xing). En esos
+        # casos la medición no sirve para aprender el ratio -- aplicarla
+        # igual ensucia la estimación de TODO el resto de la sesión con
+        # un dato que no refleja la velocidad real de análisis.
+        self._progreso_carga_duracion_audio_inicio = None
         self._timer_progreso_carga = QTimer(self)
         self._timer_progreso_carga.setInterval(60)
         self._timer_progreso_carga.timeout.connect(self._tick_progreso_carga)
@@ -5180,6 +5525,51 @@ class SmartDJPlayer(QMainWindow):
             return os.path.dirname(primera_ruta) if primera_ruta else None
         return None
 
+    def _actualizar_color_fila(self, indice):
+        """Repinta SOLO la fila de self.playlist[indice] con su color
+        actual, sin recorrer toda la lista.
+
+        Se usa cuando termina de analizarse UNA pista: antes se llamaba
+        a update_playlist_colors() entero, que con 500 temas recorre y
+        repinta las 500 filas por CADA pista analizada -- y con 4-8
+        hilos analizando en paralelo, eso son cientos de repintados
+        completos por segundo. Esa era la causa principal de que la
+        app se "sintiera trabada" mientras analizaba."""
+        if not (0 <= indice < len(self.playlist)):
+            return
+        fila = self._fila_widget_desde_indice(indice)
+        if fila is None:
+            return
+        item = self.list_widget.item(fila)
+        if item is None:
+            return
+        widget = self.list_widget.itemWidget(item)
+        if widget is None:
+            return
+        pista = self.playlist[indice]
+        if pista.saltear:
+            widget.set_color(
+                self._color_lista("lista_fila_saltear"),
+                self._color_lista("lista_fila_saltear_texto"))
+        elif indice == self.current_index:
+            widget.set_color(
+                self._color_lista("lista_fila_reproduciendo"),
+                self._color_lista("lista_fila_reproduciendo_texto"))
+        elif indice == self.next_index:
+            widget.set_color(
+                self._color_lista("lista_fila_siguiente"),
+                self._color_lista("lista_fila_siguiente_texto"))
+        elif indice == self.fila_seleccionada_click:
+            widget.set_color(
+                self._color_lista("lista_fila_seleccionada"),
+                self._color_lista("lista_fila_seleccionada_texto"))
+        else:
+            clave = "lista_fila_normal_1" if indice % 2 == 0 else "lista_fila_normal_2"
+            widget.set_color(
+                self._color_lista(clave),
+                self._color_lista("lista_fila_normal_texto"))
+
+
     def update_playlist_colors(self):
         color_reproduciendo = self._color_lista("lista_fila_reproduciendo")
         texto_reproduciendo = self._color_lista("lista_fila_reproduciendo_texto")
@@ -5288,6 +5678,7 @@ class SmartDJPlayer(QMainWindow):
                 return
             self.next_index = row
             self.update_playlist_colors()
+            self._priorizar_pista_b(self.next_index)
             next_track_path = self.playlist[self.next_index].ruta
             # Se vacía la bandeja B de una (espectro del tema anterior
             # que estaba precargado ahí) para que quede "sin datos"
@@ -5350,13 +5741,13 @@ class SmartDJPlayer(QMainWindow):
         self.engine.ruta_offset_entrada_b_forzado = ruta_b
         self.update_status(
             tr("ppal_status_punto_entrada_b").format(seg=f"{offset_segundos:.1f}"))
-        # Avisa visualmente (recuadro más rojizo, ver WaveformWidget.
-        # paintEvent) que la línea naranja de offset_entrada todavía
-        # corresponde a la posición VIEJA -- se apaga en on_preload_analyzed,
-        # cuando termina el reanálisis que dispara _reprocesar_b_debounced
-        # y la línea se recalcula para la posición nueva.
-        self.waveform_next._esperando_sincronizar_b = True
-        self.waveform_next.update()
+        # Avisa visualmente (recuadro "latiendo" en rojo fuerte, ver
+        # WaveformWidget.paintEvent) que la línea naranja de offset_entrada
+        # todavía corresponde a la posición VIEJA -- se apaga en
+        # on_preload_analyzed, cuando termina el reanálisis que dispara
+        # _reprocesar_b_debounced y la línea se recalcula para la posición
+        # nueva.
+        self.waveform_next._iniciar_pulso_sincronizar_b()
         self._reprocesar_b_debounced()
 
     def _tiempo_mezcla(self) -> float:
@@ -5467,6 +5858,7 @@ class SmartDJPlayer(QMainWindow):
             return
         if not (0 <= self.next_index < len(self.playlist)):
             return
+        self._priorizar_pista_b(self.next_index)
         next_track_path = self.playlist[self.next_index].ruta
         fade_actual = self._fade_duration_para(self.current_index, self.next_index)
         self.engine.preload_next_track(next_track_path, fade_actual)
@@ -5493,6 +5885,20 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_next.update()
         if not self.engine.is_mixing and not self._rectangulo_fijo_por_frase:
             self._posicionar_recuadro_a_en_frase_si_hace_falta()
+
+    def _priorizar_pista_b(self, indice):
+        """Le pide al analizador de fondo que suba la prioridad
+        del tema que va a ir al Deck B (el próximo a mezclarse).
+        Es una operación barata: solo mete una entrada nueva en la
+        cola de prioridad. El worker salta las que ya están listas,
+        así que si el tema ya estaba analizado, esto es un no-op."""
+        if not (0 <= indice < len(self.playlist)):
+            return
+        try:
+            self.analizador_fondo.re_encolar_con_prioridad(
+                self.playlist[indice], prioridad=0)
+        except Exception as e:
+            print(f"[dj_player] No se pudo priorizar el análisis de B: {e}")
 
     def _fade_duration_para(self, idx_actual, idx_destino):
         base = self._tiempo_mezcla()
@@ -5671,7 +6077,11 @@ class SmartDJPlayer(QMainWindow):
                     self._chequear_enganche_automatico(pos_a)
 
     def _borde_izq_recuadro_actual(self):
-        duracion = self.waveform_current.duration
+        # Usamos la duración EFECTIVA (fin de sonido real, si el usuario
+        # activó "Recortar silencio final") en vez de la duración física
+        # del archivo -- así el recuadro no puede quedar dentro de los
+        # segundos de silencio del final de un tema.
+        duracion = self.waveform_current._duracion_tope_recuadro()
         if duracion <= 0:
             return 0.0
         if self.waveform_current.mix_start_seconds >= 0:
@@ -5687,6 +6097,54 @@ class SmartDJPlayer(QMainWindow):
         if self.fraccion_enganche is not None:
             return max(0.0, min(duracion, duracion * self.fraccion_enganche))
         return max(0.0, duracion - self._fade_visual_efectivo())
+
+    def _recalcular_limite_recuadro_a(self):
+        """Recalcula el rango válido del recuadro del Deck A según la
+        config actual de "Recortar silencio final". La llama Ajustes
+        cuando el usuario prende/apaga la opción, para que el cambio se
+        vea al instante sin tener que recargar el tema."""
+        wf = self.waveform_current
+        if wf is None or len(wf.peaks) == 0:
+            return
+        self._aplicar_recorte_silencio_a_waveform(wf)
+        wf.update()
+        self.update_playlist_colors()
+
+    def _aplicar_recorte_silencio_a_waveform(self, wf):
+        """Aplica o limpia wf.duracion_efectiva según la config. Se
+        llama tanto al analizar un tema nuevo (para setearlo) como al
+        cambiar la opción en Ajustes (para re-aplicar o limpiar)."""
+        activo = bool(self.config_data.get("recortar_silencio_final", True))
+        if not activo:
+            wf.duracion_efectiva = None
+            return
+        # Necesitamos la onda mono para detectar el fin de sonido. No
+        # la tenemos guardada en el widget; la recalculamos rápido
+        # desde peaks (que es una envolvente por segmentos ya
+        # calculada). Si peaks tiene datos, estimamos fin de sonido
+        # a partir de cuándo empieza a caer por debajo de un piso.
+        if len(wf.peaks) < 4 or wf.duration <= 0:
+            wf.duracion_efectiva = None
+            return
+        # peaks es una envolvente normalizada 0..1 por segmentos. Los
+        # últimos N segmentos que están por debajo de un piso son
+        # silencio (nada de señal).
+        umbral_peak = 0.02  # muy bajo: solo atrapa silencio real, no finales suaves
+        indices_audibles = np.nonzero(wf.peaks > umbral_peak)[0]
+        if len(indices_audibles) == 0:
+            wf.duracion_efectiva = None
+            return
+        ultimo_audible = int(indices_audibles[-1])
+        # Convertimos el índice a segundos: peaks cubre toda la
+        # duración del audio, distribuidos uniformemente.
+        fin_sonido = (ultimo_audible + 1) / len(wf.peaks) * wf.duration
+        # Colchón chico (0.5s) y tope: si la diferencia con la duración
+        # total es insignificante (< 0.3s), mejor no tocar nada -- así
+        # no limitamos un tema que ya termina con sonido.
+        if wf.duration - fin_sonido < 0.3:
+            wf.duracion_efectiva = None
+        else:
+            wf.duracion_efectiva = min(fin_sonido, wf.duration)
 
     def _frase_ya_en_recuadro(self):
         wf = self.waveform_current
@@ -5810,14 +6268,60 @@ class SmartDJPlayer(QMainWindow):
         return PistaDJ(ruta=ruta, indice=indice, duracion=duracion, saltear=saltear)
 
     def _crear_pistas_con_progreso(self, rutas, indice_inicial=0):
-        pistas = []
+        """Igual que antes, pero sin bloquear el hilo de la GUI: el
+        sf.info() por archivo (que es lo que realmente tardaba, sobre
+        todo con FLAC y con cientos de temas) corre en un hilo de
+        fondo, y el hilo de GUI solo espera con su event loop normal
+        -- sin QApplication.processEvents() manual en el medio, que era
+        lo que dejaba entrar eventos a mitad de la carga y hacía que la
+        app se cerrara.
+
+        El hilo de GUI sigue bombeando eventos solo (puede mover la
+        ventana, responder clicks que el overlay bloquea igual, correr
+        timers), y va actualizando el overlay cada 200 ms mientras
+        tanto. Cuando el hilo de fondo termina, sale del loop y
+        devuelve las pistas ya armadas."""
+        if not rutas:
+            return []
         total = len(rutas)
-        for i, ruta in enumerate(rutas):
-            pistas.append(self._crear_pista(ruta, indice_inicial + i))
-            if (i + 1) % 15 == 0 or (i + 1) == total:
-                self._mostrar_overlay_espera(
-                    tr("ppal_overlay_cargando_temas").format(actual=i + 1, total=total))
-        return pistas
+        resultado = {"pistas": None, "listo": False}
+        lock = threading.Lock()
+
+        def _trabajo():
+            pistas = []
+            try:
+                for i, ruta in enumerate(rutas):
+                    pistas.append(self._crear_pista(ruta, indice_inicial + i))
+            except Exception as e:
+                print(f"[dj_player] Error creando pistas: {e}")
+            finally:
+                with lock:
+                    resultado["pistas"] = pistas
+                    resultado["listo"] = True
+
+        threading.Thread(target=_trabajo, daemon=True).start()
+
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(200)
+
+        def _chequear():
+            with lock:
+                listo = resultado["listo"]
+            if listo:
+                timer.stop()
+                loop.quit()
+
+        timer.timeout.connect(_chequear)
+        timer.start()
+        self._mostrar_overlay_espera(
+            tr("ppal_overlay_cargando_temas").format(actual=0, total=total))
+        loop.exec()
+        timer.stop()
+
+        with lock:
+            return resultado["pistas"] or []
 
     def _mostrar_overlay_espera(self, mensaje):
         self.overlay_espera.lbl_mensaje.setText(mensaje)
@@ -5826,7 +6330,15 @@ class SmartDJPlayer(QMainWindow):
             self.overlay_espera.show()
             self.overlay_espera.raise_()
             self.centralWidget().setEnabled(False)
-        QApplication.processEvents()
+        # SIN QApplication.processEvents() acá: meterlo adentro de un
+        # bucle de carga (que es como se llamaba, ver
+        # _crear_pistas_con_progreso) deja entrar clicks, timers y
+        # señales del sistema MIENTRAS la lista todavía se está armando
+        # a medias. Cualquiera de esos eventos que toque la playlist en
+        # ese instante la encuentra inconsistente y termina tirando
+        # IndexError -> la app se cierra. El event loop normal de Qt ya
+        # bombea eventos solo cuando el hilo de GUI está libre; no hace
+        # falta (ni conviene) forzarlo desde acá.
 
     def _ocultar_overlay_espera(self):
         self.overlay_espera.hide()
@@ -6311,19 +6823,73 @@ class SmartDJPlayer(QMainWindow):
         nuevas_rutas = sorted(rutas)
         if not nuevas_rutas:
             return
-        duplicados_omitidos = 0
-        if self.config_data.get(
-                "modo_carga_duplicados", DEF_MODO_CARGA_DUPLICADOS) == "sin_duplicados":
-            self._mostrar_overlay_espera(tr("ppal_overlay_buscando_duplicados"))
-            nuevas_rutas, duplicados_omitidos = self._filtrar_rutas_sin_duplicar(nuevas_rutas)
-            if not nuevas_rutas:
-                self._ocultar_overlay_espera()
-                self.update_status(
-                    tr("ppal_status_nada_nuevo").format(n=duplicados_omitidos))
-                return
-        lista_estaba_vacia = not self.playlist
+
+        # Toda la parte pesada (comparar duplicados por nombre+duración
+        # con SequenceMatcher, y leer sf.info de cada archivo para
+        # saber su duración) corre en un hilo de fondo, no en el de la
+        # GUI. Antes, con 500 temas y "sin duplicados" activado, acá se
+        # hacían ~125.000 comparaciones + 500 sf.info en el hilo de la
+        # GUI, y eso congelaba la ventana varios segundos (y, si el
+        # usuario tocaba algo en el medio, terminaba en cierre).
+        modo_sin_duplicados = (
+            self.config_data.get("modo_carga_duplicados", DEF_MODO_CARGA_DUPLICADOS)
+            == "sin_duplicados")
         indice_inicial = len(self.playlist)
-        self._mostrar_overlay_espera(tr("ppal_overlay_cargando_temas").format(actual=0, total=len(nuevas_rutas)))
+        lista_estaba_vacia = not self.playlist
+
+        resultado = {"rutas": None, "omitidas": 0, "listo": False}
+        lock = threading.Lock()
+
+        def _trabajo():
+            rutas_finales = nuevas_rutas
+            omitidas = 0
+            try:
+                if modo_sin_duplicados:
+                    rutas_finales, omitidas = self._filtrar_rutas_sin_duplicar(nuevas_rutas)
+            except Exception as e:
+                print(f"[dj_player] Error filtrando duplicados: {e}")
+                rutas_finales, omitidas = nuevas_rutas, 0
+            with lock:
+                resultado["rutas"] = rutas_finales
+                resultado["omitidas"] = omitidas
+                resultado["listo"] = True
+
+        threading.Thread(target=_trabajo, daemon=True).start()
+
+        from PySide6.QtCore import QEventLoop
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(200)
+
+        def _chequear():
+            with lock:
+                listo = resultado["listo"]
+            if listo:
+                timer.stop()
+                loop.quit()
+
+        timer.timeout.connect(_chequear)
+        timer.start()
+        if modo_sin_duplicados:
+            self._mostrar_overlay_espera(tr("ppal_overlay_buscando_duplicados"))
+        else:
+            self._mostrar_overlay_espera(
+                tr("ppal_overlay_cargando_temas").format(actual=0, total=len(nuevas_rutas)))
+        loop.exec()
+        timer.stop()
+
+        with lock:
+            nuevas_rutas = resultado["rutas"] or []
+            duplicados_omitidos = resultado["omitidas"]
+
+        if not nuevas_rutas:
+            self._ocultar_overlay_espera()
+            self.update_status(
+                tr("ppal_status_nada_nuevo").format(n=duplicados_omitidos))
+            return
+
+        self._mostrar_overlay_espera(
+            tr("ppal_overlay_cargando_temas").format(actual=0, total=len(nuevas_rutas)))
         nuevas_pistas = self._crear_pistas_con_progreso(nuevas_rutas, indice_inicial)
 
         clave_grupo_fusion = None
@@ -6559,19 +7125,34 @@ class SmartDJPlayer(QMainWindow):
         automática en perform_auto_preload). No se usa para el arranque
         en frío del lado A ni para la restauración de sesión. La
         duración total se ESTIMA (no hay progreso real disponible) a
-        partir de duracion_audio y del ratio aprendido en
-        _ratio_analisis_por_seg_audio -- ver _tick_progreso_carga() para
-        cómo se corrige ese ratio después."""
+        partir de duracion_audio y de uno de los dos ratios aprendidos
+        (libre/ocupado, según si self.analizador_fondo tiene otros
+        temas analizándose en paralelo justo ahora -- ver el comentario
+        donde se definen) -- ver _tick_progreso_carga() y
+        _detener_progreso_carga() para cómo se corrige ese ratio
+        después."""
         self._detener_progreso_carga()
         if not duracion_audio or duracion_audio <= 0:
             return
         widget = self._widget_de_fila_pista(indice)
         if widget is None:
             return
-        estimado = max(0.3, duracion_audio * self._ratio_analisis_por_seg_audio)
+        ocupado = bool(
+            self.analizador_fondo is not None
+            and self.analizador_fondo.hay_contencion())
+        ratio = (self._ratio_analisis_por_seg_audio_ocupado if ocupado
+                  else self._ratio_analisis_por_seg_audio_libre)
+        estimado = max(0.3, duracion_audio * ratio)
         self._progreso_carga_indice = indice
         self._progreso_carga_t_inicio = time.monotonic()
         self._progreso_carga_duracion_estimada = estimado
+        self._progreso_carga_estaba_ocupado = ocupado
+        self._progreso_carga_duracion_audio_inicio = duracion_audio
+        print(f"[progreso-carga] INICIO indice={indice} "
+              f"duracion_audio={duracion_audio:.1f}s ocupado={ocupado} "
+              f"ratio={ratio:.4f} estimado={estimado:.1f}s "
+              f"(libre={self._ratio_analisis_por_seg_audio_libre:.4f} "
+              f"ocupado_r={self._ratio_analisis_por_seg_audio_ocupado:.4f})")
         widget.set_progreso_carga(0.0)
         self._timer_progreso_carga.start()
 
@@ -6608,8 +7189,34 @@ class SmartDJPlayer(QMainWindow):
             widget = self._widget_de_fila_pista(indice_anterior)
             if widget is not None:
                 widget.set_progreso_carga(None)
+        duracion_audio_inicio = self._progreso_carga_duracion_audio_inicio
         if (indice_completado is not None and indice_completado == indice_anterior
                 and duracion_audio and duracion_audio > 0):
+            # Si la duración real (medida al terminar, sobre el audio ya
+            # decodificado) resultó muy distinta de la que se usó para
+            # arrancar la estimación, esta medición no es confiable para
+            # aprender el ratio: o el tag del archivo mentía la duración,
+            # o -- más feo todavía -- este preload se pisó con otro antes
+            # de terminar (otro doble-click, o perform_auto_preload
+            # recalculando next_index de nuevo) y lo que está llegando
+            # acá es una mezcla del reloj de uno con el audio del otro.
+            # Mejor descartar el dato que ensuciar el ratio para el resto
+            # de la sesión con un número que no refleja la velocidad real
+            # de análisis.
+            discrepancia = None
+            if duracion_audio_inicio and duracion_audio_inicio > 0:
+                discrepancia = abs(duracion_audio - duracion_audio_inicio) / duracion_audio_inicio
+            if discrepancia is not None and discrepancia > 0.20:
+                transcurrido = time.monotonic() - self._progreso_carga_t_inicio
+                print(f"[progreso-carga] FIN indice={indice_completado} "
+                      f"duracion_audio={duracion_audio:.1f}s "
+                      f"duracion_audio_inicio={duracion_audio_inicio:.1f}s "
+                      f"transcurrido_real={transcurrido:.1f}s "
+                      f"-- DESCARTADA (discrepancia de duración {discrepancia*100:.0f}%, "
+                      f"no se corrige el ratio aprendido con este dato)")
+                self._progreso_carga_indice = None
+                self._progreso_carga_duracion_audio_inicio = None
+                return
             transcurrido = time.monotonic() - self._progreso_carga_t_inicio
             ratio_medido = transcurrido / duracion_audio
             # Suavizado exponencial simple: cada tema real corrige el
@@ -6623,11 +7230,31 @@ class SmartDJPlayer(QMainWindow):
             # el default cada vez. Topado entre 0.01 y 1.0 para que una
             # medición rara (por ejemplo con la máquina haciendo otra
             # cosa en paralelo) no deje la estimación disparatada.
+            #
+            # Se corrige el ratio "ocupado" o el "libre" según cuál
+            # estaba vigente cuando arrancó ESTE preload (guardado en
+            # _progreso_carga_estaba_ocupado) -- así cada uno converge
+            # con mediciones reales de su propio caso, en vez de
+            # mezclarse entre sí.
             ratio_medido = float(np.clip(ratio_medido, 0.01, 1.0))
-            self._ratio_analisis_por_seg_audio = float(np.clip(
-                0.4 * self._ratio_analisis_por_seg_audio + 0.6 * ratio_medido,
-                0.01, 1.0))
+            if self._progreso_carga_estaba_ocupado:
+                anterior = self._ratio_analisis_por_seg_audio_ocupado
+                self._ratio_analisis_por_seg_audio_ocupado = float(np.clip(
+                    0.4 * anterior + 0.6 * ratio_medido, 0.01, 1.0))
+                nuevo = self._ratio_analisis_por_seg_audio_ocupado
+            else:
+                anterior = self._ratio_analisis_por_seg_audio_libre
+                self._ratio_analisis_por_seg_audio_libre = float(np.clip(
+                    0.4 * anterior + 0.6 * ratio_medido, 0.01, 1.0))
+                nuevo = self._ratio_analisis_por_seg_audio_libre
+            print(f"[progreso-carga] FIN indice={indice_completado} "
+                  f"duracion_audio={duracion_audio:.1f}s "
+                  f"transcurrido_real={transcurrido:.1f}s "
+                  f"ocupado={self._progreso_carga_estaba_ocupado} "
+                  f"ratio_medido={ratio_medido:.4f} "
+                  f"ratio_anterior={anterior:.4f} ratio_nuevo={nuevo:.4f}")
         self._progreso_carga_indice = None
+        self._progreso_carga_duracion_audio_inicio = None
 
     def _actualizar_item_pista(self, indice, pista):
         fila = self._fila_widget_desde_indice(indice)
@@ -6647,8 +7274,19 @@ class SmartDJPlayer(QMainWindow):
         if indice is None:
             return
         self._actualizar_item_pista(indice, pista)
-        self.update_playlist_colors()
-        self._pedir_orden_automatico()
+        # Repintado quirúrgico: SOLO esta fila, no toda la lista -- ver
+        # el docstring de _actualizar_color_fila.
+        self._actualizar_color_fila(indice)
+        # Reordenar mientras todavía hay análisis pendientes es
+        # contraproducente: se dispara un reordenamiento por cada pista
+        # que termina (cientos de veces por carga de carpeta) y cada
+        # uno reconstruye la lista entera. Ahora el orden se pide una
+        # sola vez, cuando ya no queda nada pendiente de analizar.
+        pendientes = sum(
+            1 for p in self.playlist
+            if p.estado_analisis in ("pendiente", "analizando"))
+        if pendientes == 0:
+            self._pedir_orden_automatico()
 
     def _reordenar_lista(self, nuevo_orden):
         ruta_actual = self.playlist[self.current_index].ruta if 0 <= self.current_index < len(self.playlist) else None
@@ -6688,6 +7326,18 @@ class SmartDJPlayer(QMainWindow):
 
     def _pedir_orden_automatico(self):
         if not self.orden_automatico_activo:
+            return
+        # Si todavía hay pistas pendientes o en análisis, no tiene
+        # sentido reordenar: en el próximo on_pista_analizada que deje
+        # la cola vacía se pide el orden una sola vez (ver ese método).
+        # Sin este chequeo, cada pista que terminaba de analizarse
+        # disparaba un reordenamiento + reconstrucción completa de la
+        # lista, y con 4-8 hilos analizando en paralelo eso era una
+        # avalancha de trabajo en el hilo de la GUI.
+        pendientes = sum(
+            1 for p in self.playlist
+            if p.estado_analisis in ("pendiente", "analizando"))
+        if pendientes > 0:
             return
         self._orden_automatico_timer.start(300)
 
@@ -7049,6 +7699,7 @@ class SmartDJPlayer(QMainWindow):
             y_mono, sr, beat_times, bpm, self._tiempo_mezcla(),
             phrase_boundaries=phrase_boundaries, datos_visuales=datos_visuales,
             downbeat_times=downbeat_times, fase_downbeat=fase_downbeat)
+        self._aplicar_recorte_silencio_a_waveform(self.waveform_current)
         self._aplicar_punto_enganche_configurado()
         self._posicionar_recuadro_a_en_frase_si_hace_falta()
         if not self.is_playing:
@@ -7061,22 +7712,29 @@ class SmartDJPlayer(QMainWindow):
             self.perform_auto_preload()
 
     def _iniciar_restauracion_reproduccion(self):
-        """Recarga (mudo) el tema que había quedado en la bandeja A la
-        última vez que se cerró el programa. play_initial() arranca a
-        sonar desde el segundo 0 como siempre, pero lo silenciamos al
-        toque para que no se escuche desde el principio mientras se
-        analiza en segundo plano -- en on_main_analyzed, apenas hay onda
-        completa disponible, se salta a la posición guardada y ahí sí
-        queda con el volumen real (reproduciendo o pausado según cómo se
-        había dejado, ver ese método).
+        """Recarga el tema que había quedado en la bandeja A la última
+        vez que se cerró el programa.
 
-        El estado de "reproduciendo" (botón, timer, barra de progreso)
-        se activa ACÁ MISMO, igual que con un play normal (toggle_play),
-        en vez de esperar a que termine el análisis en segundo plano --
-        así el reproductor nunca se ve "parado" mientras en realidad ya
-        está cargando/sonando (mudo) de fondo. Si el tema había quedado
-        pausado, on_main_analyzed se encarga de pasar a pausa recién al
-        final, una vez que ya saltó a la posición correcta."""
+        IMPORTANTE (v2): si el estado guardado era "pausado", arranca
+        YA en pausa -- no arranca en Play y después se pausa (que era
+        lo que dejaba el pequeño ruido de reproducción: el swap del
+        buffer de silencio al real se hacía mientras el mixer todavía
+        no estaba en pausa, y ese hueco se escuchaba).
+
+        Cómo queda:
+          - mixer en pausa (pygame.mixer.pause + engine.set_paused(True))
+          - is_playing=False, timer parado
+          - botón en ▶ (play, para reanudar)
+          - el tema sigue cargándose de fondo (mudo, con el buffer de
+            silencio), y cuando el análisis termina, on_main_analyzed
+            hace el seek a la posición guardada SIN salir de la pausa
+            -- el swap del buffer no se escucha porque el mixer está
+            pausado.
+
+        Si el estado guardado era "reproduciendo", arranca en Play como
+        antes: mixer andando, is_playing=True, timer andando, botón ⏸.
+        Cuando el análisis termine, on_main_analyzed hace el seek y el
+        tema sigue sonando desde la posición guardada."""
         if not (0 <= self.current_index < len(self.playlist)):
             self._posicion_restaurar_pendiente = None
             self._reanudar_reproduciendo_pendiente = False
@@ -7084,12 +7742,28 @@ class SmartDJPlayer(QMainWindow):
         track_path = self.playlist[self.current_index].ruta
         self.waveform_current.is_active = False
         self.engine.play_initial(track_path, mudo_inicial=True)
-        self.engine.chan_a.set_volume(0.0)
-        self._pausado = False
-        self._pausa_timestamp = 0.0
-        self.is_playing = True
-        self.timer.start()
-        self.btn_play.setText("⏸")
+
+        if self._reanudar_reproduciendo_pendiente:
+            # Estaba reproduciendo: seguimos en Play.
+            self._pausado = False
+            self._pausa_timestamp = 0.0
+            self.is_playing = True
+            self.timer.start()
+            self.btn_play.setText("⏸")
+        else:
+            # Estaba pausado: arrancamos YA en pausa, para que el swap
+            # del buffer (que va a hacer on_main_analyzed) no se
+            # escuche. El tema sigue cargándose de fondo en silencio.
+            try:
+                pygame.mixer.pause()
+            except Exception:
+                pass
+            self.engine.set_paused(True)
+            self._pausado = True
+            self._pausa_timestamp = time.time()
+            self.is_playing = False
+            self.timer.stop()
+            self.btn_play.setText("▶")
 
     def on_main_analyzed(self, y_mono, sr, bpm, beat_times, phrase_boundaries, datos_visuales,
                           downbeat_times, fase_downbeat):
@@ -7102,19 +7776,23 @@ class SmartDJPlayer(QMainWindow):
         self._aplicar_punto_enganche_configurado()
         self._posicionar_recuadro_a_en_frase_si_hace_falta()
         self.waveform_current.is_active = True
+        # Aplicar "Recortar silencio final" al waveform del Deck A
+        # (calcula duracion_efectiva a partir de los peaks).
+        self._aplicar_recorte_silencio_a_waveform(self.waveform_current)
         if self._posicion_restaurar_pendiente is not None:
             # Restauración de sesión pendiente (ver
             # _iniciar_restauracion_reproduccion): saltamos a la posición
-            # guardada -- seek_main_track ya deja el volumen real puesto.
+            # guardada -- seek_main_track deja el buffer correcto listo.
             posicion = self._posicion_restaurar_pendiente
             reanudar_reproduciendo = self._reanudar_reproduciendo_pendiente
             self._posicion_restaurar_pendiente = None
             self._reanudar_reproduciendo_pendiente = False
-            self.engine.seek_main_track(posicion)
+
             if reanudar_reproduciendo:
-                # Se había quedado sonando (no pausado) al cerrar el
-                # programa la vez anterior -- lo dejamos sonando de
-                # nuevo, sin necesidad de tocar ▶, tal cual estaba.
+                # Estaba reproduciendo: el mixer sigue andando. El seek
+                # reemplaza el buffer de silencio por el real y el tema
+                # sigue sonando desde la posición guardada.
+                self.engine.seek_main_track(posicion)
                 self._pausado = False
                 self._pausa_timestamp = 0.0
                 self.is_playing = True
@@ -7123,7 +7801,30 @@ class SmartDJPlayer(QMainWindow):
                 self.update_status(
                     tr("ppal_status_tema_reanudado").format(seg=f"{posicion:.0f}"))
             else:
-                pygame.mixer.pause()
+                # Estaba pausado: hacemos el seek Y lo dejamos pausado
+                # en una sola operación (dejar_pausado=True). Eso hace
+                # que seek_main_track pause el canal A inmediatamente
+                # después del swap del buffer -- sin ventana audible,
+                # y sin que el motor quede reproduciendo por detrás
+                # (que era justo el bug: el botón mostraba ▶ pero
+                # pygame seguía reproduciendo).
+                #
+                # Después reforzamos el estado en el motor (set_paused
+                # para el stream de phase-lock, por las dudas) y en la
+                # GUI (is_playing=False, timer parado, botón ▶).
+                try:
+                    pygame.mixer.pause()
+                except Exception:
+                    pass
+                self.engine.set_paused(True)
+                self.engine.seek_main_track(posicion, dejar_pausado=True)
+                # Reafirmamos la pausa después del seek -- así el
+                # estado queda consolidado aunque seek_main_track haya
+                # hecho play+pause en el medio.
+                try:
+                    pygame.mixer.pause()
+                except Exception:
+                    pass
                 self.engine.set_paused(True)
                 self._pausado = True
                 self._posicion_pausada_seg = posicion
@@ -7144,6 +7845,7 @@ class SmartDJPlayer(QMainWindow):
         nuevo_next = self._siguiente_indice_reproducible(self.current_index)
         if nuevo_next != -1:
             self.next_index = nuevo_next
+            self._priorizar_pista_b(self.next_index)
             next_track_path = self.playlist[self.next_index].ruta
             fade_actual = self._fade_duration_para(self.current_index, self.next_index)
             clave = (next_track_path, self._tiempo_mezcla())
@@ -7179,9 +7881,18 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_next.is_active = False
         # La línea naranja de offset_entrada ya quedó recalculada arriba
         # para la posición actual del recuadro -- se apaga el aviso visual
-        # que prendió on_punto_entrada_b_movido.
-        self.waveform_next._esperando_sincronizar_b = False
-        self.waveform_next.update()
+        # (y el latido) que prendió on_punto_entrada_b_movido.
+        self.waveform_next._detener_pulso_sincronizar_b()
+
+        # --- PASO 3 del flujo de "Mezclar Anterior" --------------------
+        # Si el usuario apretó "Anterior", el recuadro del Deck A todavía
+        # NO se movió (a propósito, ver trigger_prev_mix). Ahora que el
+        # tema anterior YA está analizado y listo en el B, recién acá
+        # movemos el recuadro a la frase más cercana -- y actualizamos
+        # el estado para que la mezcla efectivamente se dispare cuando
+        # la reproducción llegue a ese punto.
+        if getattr(self, "_mezcla_pendiente_objetivo", "siguiente") == "anterior":
+            self._mover_recuadro_para_anterior()
 
     def on_mix_started(self, beat_times_completo, phrase_boundaries_completo, bpm_completo,
                         duracion_completo, datos_visuales_completo, downbeat_times_completo,
@@ -7267,20 +7978,43 @@ class SmartDJPlayer(QMainWindow):
         self._posicion_restaurar_pendiente = None
         self._reanudar_reproduciendo_pendiente = False
         if self.is_playing:
-            # Primer Stop mientras suena: pausa nomás (igual que el botón
-            # ▶ al tocarlo estando en reproducción), sin sacar nada de
-            # las bandejas -- posición, buffers preparados y la mezcla
-            # que estuviera lista se quedan tal cual, así que si volvés a
-            # darle Play sigue justo donde lo dejaste. Recién en un
-            # SEGUNDO Stop (con esto ya en pausa) se vacían las bandejas
-            # de verdad y se vuelve al principio de la lista (ver más
-            # abajo, el resto de este método sin cambios).
-            pos_a, _ = self.engine.get_positions()
-            self._posicion_pausada_seg = pos_a
+            # Primer Stop mientras suena: DETENER de verdad, como un
+            # reproductor clásico -- pausa Y vuelve la línea blanca al
+            # principio del tema (0s). Deja A y B cargados en sus
+            # bandejas (con sus ondas, sus marcas, sus posiciones
+            # preparadas); lo único que cambia es que la reproducción
+            # queda pausada en 0. Si volvés a darle Play, arranca desde
+            # el principio del tema.
+            #
+            # Antes esto solo pausaba (sin reiniciar a 0), así que el
+            # botón de Stop y el de Pausa hacían lo mismo la primera
+            # vez -- eso es lo que hacía que el Play quedara confundido
+            # con el Stop.
+            #
+            # El SEGUNDO Stop (con esto ya en pausa) sí vacía las
+            # bandejas, ver más abajo.
             pygame.mixer.pause()
             self.engine.set_paused(True)
-            self._pausado = True
+            try:
+                # Mismo mecanismo que la restauración de sesión: hace
+                # el seek Y deja el canal A pausado en la posición
+                # nueva, en una sola operación atómica (sin ventana
+                # audible entre swap y pausa).
+                self.engine.seek_main_track(0.0, dejar_pausado=True)
+            except Exception:
+                pass
+            # Reafirmamos la pausa después del seek, por si el swap
+            # reactivó el canal un instante.
+            try:
+                pygame.mixer.pause()
+            except Exception:
+                pass
+            self.engine.set_paused(True)
+            # Reflejar la posición 0 en la interfaz:
+            self.waveform_current.set_progress(0.0)
+            self._posicion_pausada_seg = 0.0
             self._pausa_timestamp = time.time()
+            self._pausado = True
             self.is_playing = False
             self.timer.stop()
             self.btn_play.setText("▶")
@@ -7329,6 +8063,34 @@ class SmartDJPlayer(QMainWindow):
             self.barra_golpe_seco.reset()
         self.setWindowTitle(self._titulo_base_ventana)
         self.engine.reset_medidor_golpe_seco()
+
+    def _mover_recuadro_para_anterior(self):
+        """Paso final de "Mezclar Anterior": mueve el recuadro del Deck A
+        a la próxima frase que entre, igual que ya hacía trigger_prev_mix
+        antes, pero ahora llamado DESPUÉS de que el tema anterior esté
+        analizado y listo en el Deck B (ver el PASO 3 en
+        on_preload_analyzed).
+
+        Si no hay ninguna frase que entre (la reproducción ya pasó todas,
+        o el tema no tiene frases detectadas), dispara la mezcla
+        inmediatamente, como hacía el flujo viejo. Eso preserva el
+        comportamiento de "si ya llegaste al final, mezclá ya"."""
+        duracion = self.waveform_current.duration
+        if duracion <= 0:
+            return
+        pos_a, _ = self.engine.get_positions()
+        nuevo_borde_izq = self._buscar_borde_izq_frase_que_entra(pos_a)
+        if nuevo_borde_izq is not None:
+            self.waveform_current.mix_start_seconds = nuevo_borde_izq
+            self.waveform_current.update()
+            self._mezcla_pendiente_objetivo = "anterior"
+            self._mezcla_disparada = False
+            self.update_status(tr("ppal_status_mezcla_adelantada_ant"))
+            return
+        # No hay frase que entre: disparar la mezcla ya.
+        self._mezcla_pendiente_objetivo = "anterior"
+        self._mezcla_disparada = True
+        self._ejecutar_mezcla_anterior()
 
     def _buscar_borde_izq_frase_que_entra(self, pos_a):
         """Busca, a partir de pos_a (donde va la línea blanca ahora),
@@ -7383,24 +8145,61 @@ class SmartDJPlayer(QMainWindow):
         self._ejecutar_mezcla_siguiente()
 
     def trigger_prev_mix(self):
-        if self._anterior_indice_reproducible(self.current_index) == -1:
+        """Mezclar Anterior (tecla / botón / atajo).
+
+        A diferencia de "Siguiente" -- donde el B ya está precargado de
+        antes y por eso el recuadro se puede mover al instante -- acá el
+        B no tiene el tema correcto (puede tener el de "Siguiente", o
+        estar vacío). Por eso el flujo es PASO A PASO:
+
+          1. Limpiar lo que haya en el B.
+          2. Cargar el tema anterior en el B (preload en segundo plano).
+          3. Cuando el preload TERMINE (on_preload_analyzed), recién
+             ahí mover el recuadro del A a la frase más cercana. Ver
+             _mover_recuadro_para_anterior(), que se llama desde
+             on_preload_analyzed cuando _mezcla_pendiente_objetivo es
+             "anterior".
+
+        Antes el recuadro se movía al instante y el B todavía tardaba
+        segundos en cargarse -- durante ese rato el usuario veía el
+        recuadro adelantado y el B vacío o con el tema viejo."""
+        target_idx = self._anterior_indice_reproducible(self.current_index)
+        if target_idx == -1:
             return
         if self.engine.is_mixing:
             return
-        duracion = self.waveform_current.duration
-        if duracion <= 0:
+        if self.waveform_current.duration <= 0:
             return
-        pos_a, _ = self.engine.get_positions()
-        nuevo_borde_izq = self._buscar_borde_izq_frase_que_entra(pos_a)
-        if nuevo_borde_izq is not None:
-            self.waveform_current.mix_start_seconds = nuevo_borde_izq
-            self.waveform_current.update()
-            self._mezcla_pendiente_objetivo = "anterior"
-            self.update_status(tr("ppal_status_mezcla_adelantada_ant"))
-            return
+
+        # --- PASO 1: limpiar lo que haya en el Deck B -----------------
+        # (el waveform visual y cualquier preparado interno del motor)
+        self.waveform_next.clear()
+        with self.engine._lock_preparado_b:
+            self.engine._preparado_b = None
+
+        # --- PASO 2: preparar la carga del tema anterior ---------------
+        # next_index ahora apunta al tema anterior -- es el que va al B.
+        # Esto es clave: on_preload_analyzed usa next_index para saber
+        # dónde poner los datos analizados del B.
+        self.next_index = target_idx
         self._mezcla_pendiente_objetivo = "anterior"
-        self._mezcla_disparada = True
-        self._ejecutar_mezcla_anterior()
+        self._mezcla_disparada = False
+        self._preload_disparado_para = None
+
+        # Reflejamos el cambio en la lista (color de fila "en espera") y
+        # en las etiquetas de deck, así el usuario ve que el B cambió.
+        self.update_playlist_colors()
+
+        # Arrancamos el análisis en segundo plano del tema anterior. El
+        # recuadro del A NO se mueve todavía -- eso pasa en
+        # on_preload_analyzed (PASO 3).
+        target_path = self.playlist[target_idx].ruta
+        fade_para_anterior = self._fade_duration_para(
+            self.current_index, target_idx)
+        self.update_status("⏮ Preparando el tema anterior para mezclar...")
+        self._iniciar_progreso_carga(
+            target_idx, self.playlist[target_idx].duracion)
+        self.engine.preload_next_track(target_path, fade_para_anterior)
 
     def _ejecutar_mezcla_anterior(self):
         target_idx = self._anterior_indice_reproducible(self.current_index)
@@ -7462,6 +8261,7 @@ class SmartDJPlayer(QMainWindow):
         self._aplicar_punto_enganche_configurado()
         self._posicionar_recuadro_a_en_frase_si_hace_falta()
         self.waveform_current.is_active = True
+        self._aplicar_recorte_silencio_a_waveform(self.waveform_current)
         self.waveform_current.set_progress(elapsed_time)
         self.waveform_next.clear()
         self.perform_auto_preload()
