@@ -6,20 +6,21 @@ __pycache__/
 # --- Datos generados por el programa (no son código) ---
 cache/
 logs/
-config/
+config/*
 # ...salvo dependencias_dj.py: es código (la lista de dependencias que
-# comparten dj_player_Mixer.py y descargar_dependencias_dj.py), no un
-# dato generado por el programa como config_app.json -- sí tiene que
-# subirse a GitHub.
+# usa dj_player_Mixer.py), no un dato generado por el programa como
+# config_app.json -- sí tiene que subirse a GitHub. (usamos "config/*" y
+# no "config/" arriba: con "config/" a secas git ignora toda la carpeta
+# y esta excepción no tiene efecto -- es una limitación conocida de git).
 !config/dependencias_dj.py
 
 # --- Paquetes .whl para instalar sin internet (pesan cientos de MB,
 #     no entran en GitHub -- quien clone el repo los baja con pip) ---
 dependencias_offline/
 
-# --- Salida de PyInstaller (build_exe.bat) ---
-build/
-dist/
+# --- Salida de PyInstaller ("Crear Portable/build_exe.bat") ---
+Crear Portable/build/
+Crear Portable/SmartDJMixer/
 *.spec
 
 # --- Archivos de IDEs ---

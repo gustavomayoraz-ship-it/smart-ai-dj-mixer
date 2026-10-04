@@ -36,14 +36,16 @@ En el primer arranque el programa crea solo sus carpetas de datos (`config/`, `c
 
 ## Generar el ejecutable (.exe)
 
-El script `build_exe.bat` empaqueta todo con PyInstaller en un `.exe` standalone
-(no requiere Python instalado en la PC de destino):
+El script `Crear Portable/build_exe.bat` empaqueta todo con PyInstaller en un `.exe`
+standalone (no requiere Python instalado en la PC de destino). Pide permisos de
+administrador al ejecutarse:
 
 ```bash
+cd "Crear Portable"
 build_exe.bat
 ```
 
-El resultado queda en `dist/SmartDJMixer/`.
+El resultado queda en `Crear Portable/SmartDJMixer/`.
 
 ## Estructura del proyecto
 
@@ -53,8 +55,8 @@ setup/
   Principal.py            # Ventana principal del reproductor
   ajustes.py               # Ventana de Ajustes (mezcla, skins, atajos)
   Lista.py                 # Widget de la lista de temas
-descargar_dependencias_dj.py  # Descarga las dependencias para instalación offline
-build_exe.bat             # Genera el ejecutable con PyInstaller
+Crear Portable/
+  build_exe.bat           # Genera el ejecutable con PyInstaller (dentro de esta carpeta)
 ```
 
 ## Licencia

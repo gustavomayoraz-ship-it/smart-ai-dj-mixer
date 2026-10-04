@@ -1,4 +1,17 @@
 @echo off
+:: --- Verifica permisos de administrador; si no los tiene, se vuelve a
+::     lanzar a si mismo pidiendolos (PyInstaller necesita admin para
+::     poder escribir/limpiar bien la carpeta de salida en algunas PCs).
+net session >nul 2>&1
+if %errorLevel% == 0 (
+    goto :admin
+) else (
+    echo Se necesitan permisos de administrador, solicitando...
+    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
+
+:admin
 setlocal
 cd /d "%~dp0"
 
@@ -24,6 +37,7 @@ echo.
 
 python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --name "SmartDJMixer" ^
+  --distpath "." ^
   --collect-all PySide6 ^
   --collect-all librosa ^
   --collect-all numba ^
@@ -35,7 +49,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --collect-all pygame ^
   --collect-all pooch ^
   --hidden-import audiotsm ^
-  dj_player_Mixer.py
+  "..\dj_player_Mixer.py"
 
 if errorlevel 1 (
     echo.
@@ -46,16 +60,21 @@ if errorlevel 1 (
 
 echo.
 echo Copiando la carpeta "estilos" (los skins) al ejecutable generado...
-xcopy /E /I /Y "estilos" "dist\SmartDJMixer\estilos" >nul
+xcopy /E /I /Y "..\estilos" "SmartDJMixer\estilos" >nul
+
+echo.
+echo Borrando archivos temporales de la generacion (carpeta "build" y .spec)...
+if exist "build" rmdir /s /q "build"
+if exist "SmartDJMixer.spec" del /f /q "SmartDJMixer.spec"
 
 echo.
 echo ============================================
 echo  Listo.
-echo  El programa quedo en: dist\SmartDJMixer\
-echo  Ejecutable: dist\SmartDJMixer\SmartDJMixer.exe
+echo  El programa quedo en: SmartDJMixer\
+echo  Ejecutable: SmartDJMixer\SmartDJMixer.exe
 echo.
 echo  Para llevarlo a otra PC: copia TODA la carpeta
-echo  "dist\SmartDJMixer" completa (no solo el .exe suelto).
+echo  "SmartDJMixer" completa (no solo el .exe suelto).
 echo  La otra PC no necesita tener Python instalado.
 echo ============================================
 pause
