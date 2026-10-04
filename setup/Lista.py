@@ -7,6 +7,7 @@ No importa Principal (usa duck typing sobre PistaDJ).
 
 import os
 import sys
+import threading
 import ctypes
 import unicodedata
 import numpy as np
@@ -383,6 +384,8 @@ class DropListWidget(QListWidget):
     # importación); nombre_carpeta es solo para mostrar en el separador
     # (ver dropEvent y Principal.agregar_grupos_a_playlist).
     carpetas_dropped = Signal(list)
+    # Interna: la emite el hilo que recorre lo soltado (ver dropEvent).
+    _grupos_escaneados = Signal(list)
     eliminar_solicitado = Signal()
     items_reordenados = Signal(int, int)
 
@@ -395,6 +398,7 @@ class DropListWidget(QListWidget):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
+        self._grupos_escaneados.connect(self.carpetas_dropped)
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragEnabled(True)
@@ -528,6 +532,26 @@ class DropListWidget(QListWidget):
         super().resizeEvent(event)
         self._reposicionar_overlay()
 
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # Lista vacía (programa recién instalado, cache borrada o se
+        # borraron todos los temas): se escribe una guía en el medio para
+        # que se entienda que hay que arrastrar archivos o carpetas acá.
+        if self.count() > 0:
+            return
+        p = QPainter(self.viewport())
+        color = QColor(self.palette().text().color())
+        color.setAlpha(110)
+        p.setPen(color)
+        fuente = p.font()
+        fuente.setPointSize(max(fuente.pointSize() + 2, 11))
+        fuente.setItalic(True)
+        p.setFont(fuente)
+        area = self.viewport().rect().adjusted(16, 16, -16, -16)
+        p.drawText(area, Qt.AlignCenter | Qt.TextWordWrap,
+                   "📂\n" + tr("lista_vacia_placeholder"))
+        p.end()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -564,47 +588,19 @@ class DropListWidget(QListWidget):
         # mismos, sigue siendo un reordenamiento y no una importación.
         if event.mimeData().hasUrls() and event.source() is not self:
             rutas = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
-            # Cada carpeta de nivel superior que se soltó queda como su
-            # propio grupo (para el separador con su nombre y cantidad).
-            # Los archivos sueltos que se soltaron directo (sin arrastrar
-            # la carpeta entera, por ej. seleccionando solo un par de
-            # temas adentro del Explorador) también quedan agrupados,
-            # por la carpeta que los contiene -- así también les sale su
-            # separador, con la cantidad real que se importó (no el
-            # total de esa carpeta en disco). Agrupamos por la ruta
-            # completa de la carpeta (no solo el nombre) para no mezclar
-            # dos carpetas distintas que se llamen igual.
-            grupos_por_carpeta = {}
-            orden_carpetas = []
-
-            def _agregar_a_grupo(carpeta_path, archivo):
-                if carpeta_path not in grupos_por_carpeta:
-                    grupos_por_carpeta[carpeta_path] = {
-                        "nombre": os.path.basename(carpeta_path.rstrip("/\\")) or carpeta_path,
-                        "archivos": [],
-                    }
-                    orden_carpetas.append(carpeta_path)
-                grupos_por_carpeta[carpeta_path]["archivos"].append(archivo)
-
-            for ruta in rutas:
-                if os.path.isdir(ruta):
-                    for root, dirs, filenames in os.walk(ruta):
-                        for f in filenames:
-                            if f.lower().endswith((".mp3", ".wav", ".flac")):
-                                _agregar_a_grupo(ruta, os.path.join(root, f))
-                elif ruta.lower().endswith((".mp3", ".wav", ".flac")):
-                    carpeta_padre = os.path.dirname(ruta) or ruta
-                    _agregar_a_grupo(carpeta_padre, ruta)
-
-            grupos = [
-                (c, grupos_por_carpeta[c]["nombre"], grupos_por_carpeta[c]["archivos"])
-                for c in orden_carpetas if grupos_por_carpeta[c]["archivos"]
-            ]
-            if grupos:
-                self.carpetas_dropped.emit(grupos)
-                event.acceptProposedAction()
-                return
-            event.ignore()
+            # IMPORTANTE: acá NO se hace el trabajo pesado (recorrer las
+            # carpetas, leer los temas). Mientras dropEvent no devuelve
+            # el control, Windows tiene al Explorador (de donde viene el
+            # arrastre) esperando congelado -- con carpetas de varios GB
+            # llegaba a dejar la ventana del Explorador bloqueada hasta
+            # que el programa terminaba. Se arranca el recorrido en un
+            # hilo aparte y se acepta el drop al toque; cuando el hilo
+            # termina avisa por _grupos_escaneados (la señal salta sola
+            # al hilo de la interfaz) y recién ahí sale carpetas_dropped.
+            threading.Thread(
+                target=self._escanear_y_emitir, args=(rutas,),
+                daemon=True, name="escanear-drop").start()
+            event.acceptProposedAction()
             return
         origen = self._fila_origen_arrastre
         self._fila_origen_arrastre = -1
@@ -626,6 +622,57 @@ class DropListWidget(QListWidget):
             return
         event.acceptProposedAction()
         self.items_reordenados.emit(origen, destino)
+
+    def _escanear_y_emitir(self, rutas):
+        """Corre en un hilo de fondo (ver dropEvent)."""
+        try:
+            grupos = self._armar_grupos(rutas)
+        except Exception as e:
+            print(f"[dj_player] Error recorriendo lo soltado: {e}")
+            return
+        if grupos:
+            self._grupos_escaneados.emit(grupos)
+
+    @staticmethod
+    def _armar_grupos(rutas):
+        # Cada carpeta que contiene temas DIRECTAMENTE queda como su
+        # propio grupo (separador con su nombre y cantidad). Los archivos
+        # sueltos que se soltaron directo (sin la carpeta entera, por ej.
+        # seleccionando solo un par de temas adentro del Explorador)
+        # también quedan agrupados, por la carpeta que los contiene, con
+        # la cantidad real que se importó (no el total de esa carpeta en
+        # disco). Se agrupa por la ruta completa (no solo el nombre) para
+        # no mezclar dos carpetas distintas que se llamen igual. Si se
+        # arrastra "Mis_Mp3" con una subcarpeta por artista adentro, la
+        # lista muestra una carpeta por artista y no una sola "Mis_Mp3";
+        # una carpeta intermedia sin temas propios no aparece.
+        grupos_por_carpeta = {}
+        orden_carpetas = []
+
+        def _agregar_a_grupo(carpeta_path, archivo):
+            if carpeta_path not in grupos_por_carpeta:
+                grupos_por_carpeta[carpeta_path] = {
+                    "nombre": os.path.basename(carpeta_path.rstrip("/\\")) or carpeta_path,
+                    "archivos": [],
+                }
+                orden_carpetas.append(carpeta_path)
+            grupos_por_carpeta[carpeta_path]["archivos"].append(archivo)
+
+        for ruta in rutas:
+            if os.path.isdir(ruta):
+                for root, dirs, filenames in os.walk(ruta):
+                    dirs.sort(key=str.lower)
+                    for f in filenames:
+                        if f.lower().endswith((".mp3", ".wav", ".flac")):
+                            _agregar_a_grupo(root, os.path.join(root, f))
+            elif ruta.lower().endswith((".mp3", ".wav", ".flac")):
+                carpeta_padre = os.path.dirname(ruta) or ruta
+                _agregar_a_grupo(carpeta_padre, ruta)
+
+        return [
+            (c, grupos_por_carpeta[c]["nombre"], grupos_por_carpeta[c]["archivos"])
+            for c in orden_carpetas if grupos_por_carpeta[c]["archivos"]
+        ]
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:

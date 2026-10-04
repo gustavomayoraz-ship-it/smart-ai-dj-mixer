@@ -17,6 +17,7 @@ from ctypes import wintypes
 import threading
 import time
 import itertools
+import collections
 import queue
 import hashlib
 import gc
@@ -39,7 +40,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidgetItem, QPushButton, QLabel, QProgressBar, QFrame,
     QSpinBox, QDoubleSpinBox, QSlider, QMessageBox, QAbstractItemView,
-    QComboBox, QCheckBox, QSizePolicy, QFileDialog, QLayout
+    QComboBox, QCheckBox, QSizePolicy, QFileDialog, QLayout,
+    QDialog, QPlainTextEdit
 )
 from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QShortcut, QKeySequence,
                             QPixmap, QFont, QFontMetrics, QDrag, QLinearGradient)
@@ -1129,10 +1131,15 @@ _CAMELOT_MENOR = {
 }
 
 
-def detectar_tono(y, sr) -> dict:
+def detectar_tono(y, sr, hop_length=2048) -> dict:
     if y.size == 0:
         return {"tono": None, "tono_nombre": None}
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    # El tono sale del PROMEDIO del chroma a lo largo de todo el tema, así
+    # que no hace falta una resolución temporal fina: con hop_length=2048
+    # (en vez del 512 por defecto de librosa) hay 4 veces menos cuadros
+    # para calcular y el promedio da prácticamente lo mismo -- es la parte
+    # más pesada del análisis de la lista.
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
     perfil_tema = chroma.mean(axis=1)
     if perfil_tema.std() < 1e-9:
         return {"tono": None, "tono_nombre": None}
@@ -1996,6 +2003,14 @@ def _limpiar_hum_y_dc_stereo(y_stereo, sr):
     if pico > 0.999:
         y = y / pico * 0.985
     return np.ascontiguousarray(np.clip(y, -0.985, 0.985), dtype=np.float32)
+# Análisis de la lista (BPM/tono/energía para ordenar): se hace sobre un
+# fragmento del medio del tema y a menor frecuencia de muestreo -- es solo
+# metadata, no afecta la calidad del audio que suena. Ver
+# AnalizadorDeFondoDJ._procesar.
+ANALISIS_LISTA_SR = 22050
+ANALISIS_LISTA_SEG_FRAGMENTO = 90.0
+
+
 class AnalizadorDeFondoDJ:
     def __init__(self, notificar, num_hilos=None):
         self.notificar = notificar
@@ -2066,7 +2081,15 @@ class AnalizadorDeFondoDJ:
         que, mientras esto da True, esos hilos le compiten CPU al
         preload y tardar varias veces más de lo normal es esperable, no
         un problema -- así puede usar una estimación de tiempo distinta
-        (y aprendida aparte) para ese caso."""
+        (y aprendida aparte) para ese caso.
+
+        Si el análisis está en pausa (ver pausar(): se pausa mientras se
+        prepara el lado B), no cuenta como contención aunque queden
+        temas en la cola o algún hilo terminando el que ya tenía
+        empezado -- ya no arranca nada nuevo y suelta la CPU en pocos
+        segundos."""
+        if not self._permiso_continuar.is_set():
+            return False
         return self._hilos_ocupados > 0 or not self._cola.empty()
 
     def _procesar(self) -> None:
@@ -2110,17 +2133,44 @@ class AnalizadorDeFondoDJ:
                     pista.fase_downbeat = entrada.get("fase_downbeat")
                     pista.energia = entrada.get("energia")
                 else:
-                    y, sr = librosa.load(ruta_abs, sr=None, mono=True)
+                    # Este análisis es SOLO metadata de la lista (BPM, tono,
+                    # energía para ordenar/mostrar) -- no toca el audio que
+                    # suena (eso lo decodifica aparte, a calidad completa,
+                    # la preparación del deck). Por eso alcanza con un
+                    # fragmento del medio del tema a 22.05 kHz en vez del
+                    # tema entero a 44.1 kHz: beat_track y sobre todo
+                    # chroma_cqt (lo más pesado) bajan varias veces el
+                    # tiempo, y el BPM/tono se detectan igual de bien con
+                    # ~90 s de música. (fase_downbeat queda relativa al
+                    # fragmento; ninguna otra parte la usa por pista.)
+                    _t0 = time.monotonic()
+                    offset_frag = 0.0
+                    try:
+                        dur_total = float(sf.info(ruta_abs).duration)
+                        if dur_total > ANALISIS_LISTA_SEG_FRAGMENTO * 1.3:
+                            offset_frag = (dur_total - ANALISIS_LISTA_SEG_FRAGMENTO) / 2.0
+                    except Exception:
+                        dur_total = None
+                    y, sr = librosa.load(
+                        ruta_abs, sr=ANALISIS_LISTA_SR, mono=True,
+                        offset=offset_frag, duration=ANALISIS_LISTA_SEG_FRAGMENTO)
+                    _t_load = time.monotonic() - _t0
                     tempo, _beat_frames = librosa.beat.beat_track(y=y, sr=sr)
                     bpm = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
                     bpm = _corregir_media_o_doble_tempo(bpm)
+                    _t_beat = time.monotonic() - _t0 - _t_load
                     resultado_tono = detectar_tono(y, sr)
+                    _t_tono = time.monotonic() - _t0 - _t_load - _t_beat
                     if len(_beat_frames) > 0:
                         beat_times_full = librosa.frames_to_time(_beat_frames, sr=sr)
                         fase_downbeat, _ = detectar_downbeat(y, sr, beat_times_full)
                     else:
                         fase_downbeat = 0
                     energia = float(np.sqrt(np.mean(np.square(y)))) if y.size else 0.0
+                    print(f"[analisis-lista] '{os.path.basename(ruta_abs)}' "
+                          f"total={time.monotonic() - _t0:.2f}s "
+                          f"(carga={_t_load:.2f}s beat={_t_beat:.2f}s "
+                          f"tono={_t_tono:.2f}s) bpm={bpm:.1f}")
                     pista.bpm = bpm
                     pista.energia = energia
                     pista.tono = resultado_tono["tono"]
@@ -2813,6 +2863,24 @@ def _init_dependencias_opcionales():
         _AUDIOTSM_DISPONIBLE = True
     except Exception:
         _AUDIOTSM_DISPONIBLE = False
+
+
+def _precalentar_analisis():
+    """Corre una vez, en un hilo aparte, las mismas funciones de librosa
+    que usa el análisis de la lista (beat_track, chroma_cqt) sobre unos
+    segundos de ruido. La PRIMERA vez que se llaman en el proceso, numba
+    las compila (~20 s en la máquina de Gustavo, y los 6 hilos del
+    análisis lo hacían a la vez en el primer lote de temas); hecho acá,
+    en segundo plano apenas arranca el programa, esa espera ya pasó
+    cuando se cargan los temas. No afecta ningún resultado."""
+    try:
+        sr = ANALISIS_LISTA_SR
+        rng = np.random.default_rng(0)
+        y = (rng.standard_normal(sr * 6) * 0.1).astype(np.float32)
+        librosa.beat.beat_track(y=y, sr=sr)
+        detectar_tono(y, sr)
+    except Exception:
+        pass
 
 
 class _PhaseLockedStream:
@@ -4862,6 +4930,144 @@ class BarraTituloPersonalizada(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+class _RegistroConsola(QObject):
+    """Copia todo lo que el programa imprime (print y errores) a un
+    buffer en memoria, para poder verlo desde el botón 🖥 de la ventana
+    principal -- sirve también en el portable (.exe), donde no hay
+    consola. Se instala UNA vez al arrancar (ver lanzar_app) cambiando
+    sys.stdout/sys.stderr por un "tee": lo que se escribe sigue yendo a
+    la salida original (si existe) y además queda acá. print() se puede
+    llamar desde cualquier hilo (análisis en segundo plano, etc.): la
+    señal salta sola al hilo de la interfaz."""
+    texto_nuevo = Signal(str)
+
+    _instancia = None
+
+    class _Tee:
+        def __init__(self, registro, original):
+            self._registro = registro
+            self._original = original
+
+        def write(self, texto):
+            if self._original is not None:
+                try:
+                    self._original.write(texto)
+                except Exception:
+                    pass
+            if texto:
+                self._registro._agregar(texto)
+            return len(texto) if texto else 0
+
+        def flush(self):
+            if self._original is not None:
+                try:
+                    self._original.flush()
+                except Exception:
+                    pass
+
+        def isatty(self):
+            return False
+
+        def __getattr__(self, nombre):
+            # encoding, fileno, etc.: se delegan al original si existe
+            if self._original is None:
+                raise AttributeError(nombre)
+            return getattr(self._original, nombre)
+
+    def __init__(self):
+        super().__init__()
+        self._trozos = collections.deque(maxlen=20000)
+        self._lock = threading.Lock()
+
+    @classmethod
+    def instalar(cls):
+        if cls._instancia is not None:
+            return cls._instancia
+        reg = cls()
+        sys.stdout = cls._Tee(reg, sys.stdout)
+        sys.stderr = cls._Tee(reg, sys.stderr)
+        cls._instancia = reg
+        return reg
+
+    def _agregar(self, texto):
+        with self._lock:
+            self._trozos.append(texto)
+        try:
+            self.texto_nuevo.emit(texto)
+        except RuntimeError:
+            pass
+
+    def todo(self):
+        with self._lock:
+            return "".join(self._trozos)
+
+    def limpiar(self):
+        with self._lock:
+            self._trozos.clear()
+
+
+class ConsolaDialog(QDialog):
+    """Ventana (no modal) con lo que el programa va imprimiendo -- ver
+    _RegistroConsola."""
+
+    def __init__(self, registro, parent=None):
+        super().__init__(parent)
+        self._registro = registro
+        self.setWindowTitle(tr("consola_titulo"))
+        self.resize(760, 420)
+        layout = QVBoxLayout(self)
+        self.txt = QPlainTextEdit()
+        self.txt.setReadOnly(True)
+        self.txt.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.txt.setMaximumBlockCount(5000)
+        fuente = QFont("Consolas")
+        fuente.setStyleHint(QFont.Monospace)
+        fuente.setPointSize(9)
+        self.txt.setFont(fuente)
+        self.txt.setStyleSheet(
+            "QPlainTextEdit { background-color: #0b0f14; color: #cfe8cf; }")
+        layout.addWidget(self.txt, 1)
+        fila = QHBoxLayout()
+        fila.addStretch()
+        btn_copiar = QPushButton(tr("consola_btn_copiar"))
+        btn_limpiar = QPushButton(tr("consola_btn_limpiar"))
+        btn_copiar.clicked.connect(self._copiar)
+        btn_limpiar.clicked.connect(self._limpiar)
+        fila.addWidget(btn_copiar)
+        fila.addWidget(btn_limpiar)
+        layout.addLayout(fila)
+        self.txt.setPlainText(registro.todo())
+        self._ir_al_final()
+        registro.texto_nuevo.connect(self._agregar)
+
+    def _ir_al_final(self):
+        barra = self.txt.verticalScrollBar()
+        barra.setValue(barra.maximum())
+
+    def _agregar(self, texto):
+        barra = self.txt.verticalScrollBar()
+        estaba_abajo = barra.value() >= barra.maximum() - 4
+        cursor = self.txt.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(texto)
+        if estaba_abajo:
+            self._ir_al_final()
+
+    def _copiar(self):
+        QApplication.clipboard().setText(self.txt.toPlainText())
+
+    def _limpiar(self):
+        self._registro.limpiar()
+        self.txt.clear()
+
+    def closeEvent(self, event):
+        try:
+            self._registro.texto_nuevo.disconnect(self._agregar)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
+
+
 def _formatear_duracion_separador(segundos: float) -> str:
     """Como _formatear_duracion, pero con horas cuando el total del lote
     de una carpeta las supera (p. ej. "1:14:59"), igual que AIMP."""
@@ -4995,7 +5201,7 @@ class SmartDJPlayer(QMainWindow):
         # guarda entre sesiones, así que ese primer tema siempre pifiaba
         # fuerte aunque los siguientes se fueran corrigiendo solos).
         self._ratio_analisis_por_seg_audio_libre = 0.13
-        self._ratio_analisis_por_seg_audio_ocupado = 0.30
+        self._ratio_analisis_por_seg_audio_ocupado = 0.18
         self._progreso_carga_indice = None
         self._progreso_carga_t_inicio = 0.0
         self._progreso_carga_duracion_estimada = 1.0
@@ -5013,6 +5219,17 @@ class SmartDJPlayer(QMainWindow):
         # igual ensucia la estimación de TODO el resto de la sesión con
         # un dato que no refleja la velocidad real de análisis.
         self._progreso_carga_duracion_audio_inicio = None
+        # Mientras se prepara el lado B se pausa el análisis de fondo de
+        # la lista (ver _pausar_analisis_fondo_para_b): con cientos de
+        # temas analizándose en paralelo, la preparación del B pasaba de
+        # ~20 s a ~95 s porque los hilos se repartían la CPU. Se retoma
+        # en on_preload_analyzed; este timer es solo un seguro por si
+        # esa preparación falla o se cancela y nunca llega ese aviso, así
+        # el análisis no se queda pausado para siempre.
+        self._timer_reanudar_analisis = QTimer(self)
+        self._timer_reanudar_analisis.setSingleShot(True)
+        self._timer_reanudar_analisis.setInterval(120000)
+        self._timer_reanudar_analisis.timeout.connect(self._reanudar_analisis_fondo)
         self._timer_progreso_carga = QTimer(self)
         self._timer_progreso_carga.setInterval(60)
         self._timer_progreso_carga.timeout.connect(self._tick_progreso_carga)
@@ -5229,6 +5446,11 @@ class SmartDJPlayer(QMainWindow):
         self.lbl_master_val.setStyleSheet("font-weight: bold; color: #00ff80;")
         cfg_layout.addWidget(self.lbl_master_val)
         self.engine.set_master_volume(volumen_inicial)
+        self.btn_consola = QPushButton("🖥")
+        self.btn_consola.setFixedWidth(36)
+        self.btn_consola.setToolTip(tr("ppal_tooltip_btn_consola"))
+        self.btn_consola.clicked.connect(self.abrir_consola)
+        cfg_layout.addWidget(self.btn_consola)
         self.btn_config = QPushButton("⚙")
         self.btn_config.setFixedWidth(36)
         self.btn_config.setToolTip(tr("ppal_tooltip_btn_config"))
@@ -5806,6 +6028,25 @@ class SmartDJPlayer(QMainWindow):
         self.fraccion_enganche = (nuevo_borde_izq / wf.duration) if wf.duration > 0 else None
         wf.update()
 
+    def abrir_consola(self):
+        existente = getattr(self, "_dialogo_consola", None)
+        if existente is not None:
+            try:
+                if existente.isVisible():
+                    existente.raise_()
+                    existente.activateWindow()
+                    return
+            except RuntimeError:
+                pass
+        registro = _RegistroConsola.instalar()
+        dialogo = ConsolaDialog(registro, self)
+        dialogo.setWindowModality(Qt.NonModal)
+        dialogo.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialogo.destroyed.connect(lambda *_: setattr(self, "_dialogo_consola", None))
+        self._dialogo_consola = dialogo
+        dialogo.show()
+        dialogo.raise_()
+
     def abrir_configuracion_teclas(self):
         dialogo_existente = getattr(self, "_dialogo_ajustes", None)
         if dialogo_existente is not None:
@@ -6246,17 +6487,24 @@ class SmartDJPlayer(QMainWindow):
         self._mezcla_disparada = False
 
     def load_folder(self, folder_path):
-        files = []
+        # Igual que al arrastrar una carpeta a la lista (ver
+        # DropListWidget.dropEvent): cada tema se agrupa por la carpeta
+        # que lo contiene directamente, no por la de nivel superior.
+        grupos = []
+        total = 0
         for root, dirs, filenames in os.walk(folder_path):
-            for f in filenames:
-                if f.lower().endswith(EXTENSIONES_AUDIO_SOPORTADAS):
-                    files.append(os.path.join(root, f))
-        if not files:
+            dirs.sort(key=str.lower)
+            archivos = [os.path.join(root, f) for f in filenames
+                        if f.lower().endswith(EXTENSIONES_AUDIO_SOPORTADAS)]
+            if archivos:
+                nombre = os.path.basename(root.rstrip("/\\")) or root
+                grupos.append((root, nombre, archivos))
+                total += len(archivos)
+        if not total:
             self.update_status(tr("ppal_status_no_audios").format(carpeta=folder_path))
             return
         self.settings.setValue("last_folder", folder_path)
-        self.agregar_archivos_a_playlist(
-            files, carpeta_path=folder_path, nombre_carpeta=os.path.basename(folder_path))
+        self.agregar_grupos_a_playlist(grupos)
 
     def _crear_pista(self, ruta, indice):
         duracion = None
@@ -7116,6 +7364,23 @@ class SmartDJPlayer(QMainWindow):
             return None
         return self.list_widget.itemWidget(item)
 
+    def _pausar_analisis_fondo_para_b(self):
+        """Pausa el análisis de fondo de la lista (BPM/tono para ordenar)
+        mientras se prepara el tema del lado B, para que la preparación
+        tenga la CPU casi toda para ella -- el que se está analizando
+        justo ahora termina (unos segundos) y no arranca ninguno nuevo.
+        Se retoma en on_preload_analyzed (o por el timer de seguridad)."""
+        analizador = getattr(self, "analizador_fondo", None)
+        if analizador is None:
+            return
+        analizador.pausar()
+        self._timer_reanudar_analisis.start()
+
+    def _reanudar_analisis_fondo(self):
+        analizador = getattr(self, "analizador_fondo", None)
+        if analizador is not None:
+            analizador.reanudar()
+
     def _iniciar_progreso_carga(self, indice, duracion_audio):
         """Arranca la barra de "carga" sobre la fila de self.playlist[indice]
         (ver FilaTemaWidget.set_progreso_carga) -- se llama justo antes
@@ -7132,6 +7397,7 @@ class SmartDJPlayer(QMainWindow):
         _detener_progreso_carga() para cómo se corrige ese ratio
         después."""
         self._detener_progreso_carga()
+        self._pausar_analisis_fondo_para_b()
         if not duracion_audio or duracion_audio <= 0:
             return
         widget = self._widget_de_fila_pista(indice)
@@ -7867,6 +8133,7 @@ class SmartDJPlayer(QMainWindow):
         self._detener_progreso_carga(
             indice_completado=self.next_index,
             duracion_audio=(len(y_next_mono_completo) / float(sr)) if sr else None)
+        self._timer_reanudar_analisis.stop()
         self.analizador_fondo.reanudar()
         fade_para_b = self.waveform_current.fade_duration
         if fade_para_b <= 0:
@@ -8290,6 +8557,11 @@ class SmartDJPlayer(QMainWindow):
 
 
 def lanzar_app(config_data: dict) -> None:
+    # Lo primero: que todo lo que se imprima desde acá en adelante quede
+    # disponible en el botón 🖥 (ver _RegistroConsola).
+    _RegistroConsola.instalar()
+    threading.Thread(target=_precalentar_analisis, daemon=True,
+                     name="precalentar-analisis").start()
     _init_dependencias_opcionales()
 
     import pygame

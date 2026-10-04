@@ -62,7 +62,7 @@ TEXTOS = {
         "ppal_tooltip_cerrar_ventana": "Cerrar",
         "ppal_overlay_analizando": "⏳ Analizando temas, esperá un momento...",
         "ppal_lista_recuperada": "Lista recuperada de la sesión anterior ({n} pistas).",
-        "ppal_lista_vacia_arrastra": "Lista vacía. Arrastrá archivos o usá 📂 Cargar carpeta.",
+        "ppal_lista_vacia_arrastra": "Lista vacía. Arrastrá archivos o carpetas a la lista.",
         "ppal_deck_a_vacio": "Deck A: (sin tema)",
         "ppal_deck_b_vacio": "Deck B: (sin tema en espera)",
         "ppal_deck_a_nombre": "Deck A",
@@ -132,6 +132,11 @@ TEXTOS = {
         # --- Ventana de la lista de temas (Lista.py) ---
         "lista_tooltip_saltear": "Saltear este tema: se queda en la lista pero el avance\nautomático lo salta, como si no estuviera (se lo puede\nseguir reproduciendo a mano con doble click).",
         "lista_ventana_titulo": "🎵 Lista de temas: {n}",
+        "lista_vacia_placeholder": "Arrastrá archivos o carpetas acá",
+        "ppal_tooltip_btn_consola": "Consola: ver lo que está haciendo el programa",
+        "consola_titulo": "🖥 Consola",
+        "consola_btn_copiar": "Copiar todo",
+        "consola_btn_limpiar": "Limpiar",
         "lista_tooltip_aleatorio_on": "Modo aleatorio ACTIVADO: los temas se van sorteando sin repetir. Click para volver al orden normal de la lista.",
         "lista_tooltip_aleatorio_off": "Orden normal. Click para activar el modo aleatorio (los temas se van sorteando sin repetir hasta agotar la lista).",
 
@@ -219,7 +224,7 @@ TEXTOS = {
         "ppal_tooltip_cerrar_ventana": "Close",
         "ppal_overlay_analizando": "⏳ Analyzing tracks, please wait...",
         "ppal_lista_recuperada": "Playlist restored from last session ({n} tracks).",
-        "ppal_lista_vacia_arrastra": "Empty playlist. Drag files here or use 📂 Load folder.",
+        "ppal_lista_vacia_arrastra": "Empty playlist. Drag files or folders onto the list.",
         "ppal_deck_a_vacio": "Deck A: (no track)",
         "ppal_deck_b_vacio": "Deck B: (no track queued)",
         "ppal_deck_a_nombre": "Deck A",
@@ -289,6 +294,11 @@ TEXTOS = {
         # --- Playlist window (Lista.py) ---
         "lista_tooltip_saltear": "Skip this track: it stays in the list but auto-advance\nskips over it, as if it weren't there (you can still\nplay it by hand with a double click).",
         "lista_ventana_titulo": "🎵 Track list: {n}",
+        "lista_vacia_placeholder": "Drag files or folders here",
+        "ppal_tooltip_btn_consola": "Console: see what the program is doing",
+        "consola_titulo": "🖥 Console",
+        "consola_btn_copiar": "Copy all",
+        "consola_btn_limpiar": "Clear",
         "lista_tooltip_aleatorio_on": "Shuffle mode ON: tracks are drawn without repeats.\nClick to go back to the list's normal order.",
         "lista_tooltip_aleatorio_off": "Normal order. Click to enable shuffle mode (tracks are\ndrawn without repeats until the list runs out).",
 
@@ -376,7 +386,7 @@ TEXTOS = {
         "ppal_tooltip_cerrar_ventana": "Fechar",
         "ppal_overlay_analizando": "⏳ Analisando faixas, aguarde um momento...",
         "ppal_lista_recuperada": "Lista recuperada da sessão anterior ({n} faixas).",
-        "ppal_lista_vacia_arrastra": "Lista vazia. Arraste arquivos ou use 📂 Carregar pasta.",
+        "ppal_lista_vacia_arrastra": "Lista vazia. Arraste arquivos ou pastas para a lista.",
         "ppal_deck_a_vacio": "Deck A: (sem faixa)",
         "ppal_deck_b_vacio": "Deck B: (sem faixa em espera)",
         "ppal_deck_a_nombre": "Deck A",
@@ -446,6 +456,11 @@ TEXTOS = {
         # --- Janela da lista de faixas (Lista.py) ---
         "lista_tooltip_saltear": "Pular esta faixa: ela continua na lista, mas o avanço\nautomático a pula, como se não estivesse ali (ainda dá\npara tocá-la manualmente com um duplo clique).",
         "lista_ventana_titulo": "🎵 Lista de faixas: {n}",
+        "lista_vacia_placeholder": "Arraste arquivos ou pastas aqui",
+        "ppal_tooltip_btn_consola": "Console: ver o que o programa está fazendo",
+        "consola_titulo": "🖥 Console",
+        "consola_btn_copiar": "Copiar tudo",
+        "consola_btn_limpiar": "Limpar",
         "lista_tooltip_aleatorio_on": "Modo aleatório ATIVADO: as faixas vão sendo sorteadas\nsem repetir. Clique para voltar à ordem normal da lista.",
         "lista_tooltip_aleatorio_off": "Ordem normal. Clique para ativar o modo aleatório (as\nfaixas vão sendo sorteadas sem repetir até esgotar a lista).",
 
