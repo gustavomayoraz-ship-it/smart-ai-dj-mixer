@@ -95,6 +95,8 @@ from setup.ajustes import (
     DEF_FADE_MINIMO_SEG,
     DEF_ORDENAR_POR_TONO,
     DEF_MODO_CARGA_DUPLICADOS,
+    DEF_ANCLAJE_ZONA_B,
+    DEF_ANCLAJE_DOWNBEAT_AUTOMATICO,
 )
 
 
@@ -2433,9 +2435,10 @@ class WaveformWidget(QWidget):
         # cambio de tema con los botones de siguiente/anterior funcionan
         # exactamente igual en Automático que en Manual. Ver el checkbox
         # "Auto/Man" de la Zona de mezcla en Ajustes.
-        automatico_downbeat = (
-            self.anclaje_zona_b == "downbeat"
-            and self.anclaje_downbeat_automatico)
+        # Para el Deck B vale con cualquier anclaje (Frase o Downbeat):
+        # en Automático el recuadro de B siempre arranca en el principio
+        # del tema.
+        automatico_downbeat = bool(self.anclaje_downbeat_automatico)
 
         duracion_tope = self._duracion_tope_recuadro()
         if self.is_incoming_deck:
@@ -3076,6 +3079,13 @@ class SeamlessMixerEngine(QObject):
         # archivo puntual) arrancan directo en el segundo 0 -- hasta que
         # el usuario lo vuelva a mover a una frase. Ver preload_next_track.
         self.fijo_al_inicio_b = False
+        # Automático (True): en cada tema nuevo el recuadro de B arranca
+        # SIEMPRE en el principio, sea Frase o Downbeat; lo que se mueva
+        # a mano vale solo para ese tema. Manual (False): se queda donde
+        # lo dejó el usuario (offset_b_pegajoso, en segundos) para los
+        # temas siguientes; si lo pegó al principio, fijo_al_inicio_b.
+        self.anclaje_downbeat_automatico = DEF_ANCLAJE_DOWNBEAT_AUTOMATICO
+        self.offset_b_pegajoso = None
         self._preparado_b = None
         self._lock_preparado_b = threading.Lock()
         self._prep_en_curso_lock = threading.Lock()
@@ -3154,8 +3164,10 @@ class SeamlessMixerEngine(QObject):
         self.offset_entrada_actual = 0.0
         self._lock_reprocesar_actual = threading.Lock()
         self._version_pista_actual = 0
+        self._pausado_motor = False
 
     def set_paused(self, paused: bool) -> None:
+        self._pausado_motor = bool(paused)
         if self._phase_stream is not None:
             self._phase_stream.set_paused(bool(paused))
 
@@ -3776,7 +3788,15 @@ class SeamlessMixerEngine(QObject):
                         self.chan_a.set_volume(float(np.clip(self.master_volume, 0.0, 1.0)))
                         if hay_swap_en_caliente:
                             try:
-                                self.seek_main_track(self._get_master_position())
+                                # Si la sesión se restauró en pausa, el
+                                # canje del buffer tiene que dejar el canal
+                                # pausado en la misma operación: sin esto
+                                # el tema real sonaba unos ms hasta que la
+                                # interfaz volvía a pausar (el "clip" al
+                                # reabrir el programa en pausa).
+                                self.seek_main_track(
+                                    self._get_master_position(),
+                                    dejar_pausado=self._pausado_motor)
                             except Exception:
                                 pass
                 else:
@@ -3857,6 +3877,16 @@ class SeamlessMixerEngine(QObject):
                 # _construir_buffer_con_rampa) así que no hace falta esa
                 # pausa -- stop()+play() sin nada en el medio.
                 self.current_sound_a = nuevo_sonido
+                if dejar_pausado:
+                    # Volumen 0 ANTES del play(): chan_a.play() destapa
+                    # el canal aunque el mixer estuviera en pausa, y
+                    # entre ese play() y el pause() de abajo el hilo de
+                    # audio llega a sacar unos milisegundos del tema
+                    # real (el "clip" al reabrir el programa con el
+                    # tema pausado). Con volumen 0 esa ventana es
+                    # silencio; el volumen real se restaura más abajo,
+                    # ya con el canal pausado.
+                    self.chan_a.set_volume(0.0)
                 self.chan_a.play(self.current_sound_a)
                 if dejar_pausado:
                     # Pausar INMEDIATAMENTE después del play, en la
@@ -4029,6 +4059,10 @@ class SeamlessMixerEngine(QObject):
         centro_fade_b = max(0.25, float(fade_duration) / 2.0)
         if offset_forzado is not None:
             mejor_beat_aligned = max(0.0, float(offset_forzado))
+            _muestras_b = y_next.shape[1] if getattr(y_next, "ndim", 1) == 2 else len(y_next)
+            mejor_beat_aligned = min(
+                mejor_beat_aligned,
+                max(0.0, _muestras_b / float(sr) - float(fade_duration)))
             print(f"[prep]   entrada de B FORZADA a mano: {mejor_beat_aligned:.3f}s")
         elif self.anclaje_zona_b == "downbeat":
             mejor_beat_aligned = 0.0
@@ -4434,6 +4468,20 @@ class SeamlessMixerEngine(QObject):
 
         threading.Thread(target=_restaurar_en_fondo, daemon=True).start()
 
+    def _offset_entrada_b_para(self, ruta):
+        """Punto de entrada de B (en segundos) que hay que forzar para
+        este tema según el modo de Zona de mezcla, o None si no hay
+        regla y vale el cálculo normal (Frase/Downbeat)."""
+        if self.ruta_offset_entrada_b_forzado == ruta and self.offset_entrada_b_forzado is not None:
+            return self.offset_entrada_b_forzado
+        if self.anclaje_downbeat_automatico:
+            return 0.0
+        if self.fijo_al_inicio_b:
+            return 0.0
+        if self.offset_b_pegajoso is not None:
+            return self.offset_b_pegajoso
+        return None
+
     def preload_next_track(self, next_file_path, fade_duration=8.0):
         if not next_file_path or not os.path.exists(next_file_path):
             return
@@ -4445,10 +4493,7 @@ class SeamlessMixerEngine(QObject):
             try:
                 self.status_update.emit(
                     f"Precargando y estabilizando: {os.path.basename(next_file_path)}...")
-                offset_forzado = (
-                    self.offset_entrada_b_forzado
-                    if self.ruta_offset_entrada_b_forzado == next_file_path
-                    else None)
+                offset_forzado = self._offset_entrada_b_para(next_file_path)
                 preparado = self._preparar_mezcla_b(next_file_path, fade_duration, offset_forzado)
                 with self._lock_preparado_b:
                     self._preparado_b = preparado
@@ -4480,10 +4525,7 @@ class SeamlessMixerEngine(QObject):
                 self._evento_bpm_a_listo.wait(timeout=1.0)
                 with self._lock_preparado_b:
                     preparado = self._preparado_b
-                    offset_forzado_esperado = (
-                        self.offset_entrada_b_forzado
-                        if self.ruta_offset_entrada_b_forzado == next_file_path
-                        else None)
+                    offset_forzado_esperado = self._offset_entrada_b_para(next_file_path)
                     usa_precomputado = (
                         preparado is not None
                         and preparado.get("ruta") == next_file_path
@@ -5068,6 +5110,30 @@ class ConsolaDialog(QDialog):
         super().closeEvent(event)
 
 
+class _LabelClickeable(QLabel):
+    """QLabel que avisa cuando se le hace clic con el botón izquierdo
+    (se usa en las etiquetas "Deck A: ..." / "Deck B: ..." del
+    reproductor, para saltar a ese tema en la lista)."""
+    clicked = Signal()
+
+    def __init__(self, texto=""):
+        super().__init__(texto)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+def _anclaje_zona_b_configurado(config_data) -> str:
+    """"frase" o "downbeat", según lo guardado en la config o, si no hay
+    nada guardado, según DEF_ANCLAJE_ZONA_B (setup/ajustes.py). Tolera
+    mayúsculas ("Frase" == "frase")."""
+    valor = str(config_data.get("anclaje_zona_b", DEF_ANCLAJE_ZONA_B)).strip().lower()
+    return "frase" if valor == "frase" else "downbeat"
+
+
 def _formatear_duracion_separador(segundos: float) -> str:
     """Como _formatear_duracion, pero con horas cuando el total del lote
     de una carpeta las supera (p. ej. "1:14:59"), igual que AIMP."""
@@ -5226,6 +5292,33 @@ class SmartDJPlayer(QMainWindow):
         # en on_preload_analyzed; este timer es solo un seguro por si
         # esa preparación falla o se cancela y nunca llega ese aviso, así
         # el análisis no se queda pausado para siempre.
+        # Medidor de "pantalla colgada": un timer de 50 ms que anota en la
+        # consola cuando tarda mucho más en volver a ejecutarse, o sea
+        # cuando el hilo de la interfaz estuvo ocupado/bloqueado (ver
+        # _tick_latido_ui). Sirve para encontrar qué trababa la parte
+        # visual al terminar una mezcla.
+        self._ultimo_latido_ui = time.monotonic()
+        self._timer_latido_ui = QTimer(self)
+        self._timer_latido_ui.setInterval(50)
+        self._timer_latido_ui.timeout.connect(self._tick_latido_ui)
+        # faulthandler.dump_traceback_later vuelca la pila de TODOS los
+        # hilos a un archivo si el latido no se renueva en 1.5 s, aunque
+        # el hilo que tiene la interfaz trabado esté dentro de código C
+        # (que no suelta el GIL). Así se ve QUÉ función congela la
+        # pantalla. Archivo: ~/.py_dj_cache/ui_lag_dump.txt
+        self._archivo_dump_lag = None
+        try:
+            import faulthandler
+            _dir_dump = os.path.join(os.path.expanduser("~"), ".py_dj_cache")
+            os.makedirs(_dir_dump, exist_ok=True)
+            self._archivo_dump_lag = open(
+                os.path.join(_dir_dump, "ui_lag_dump.txt"), "w", encoding="utf-8")
+            self._archivo_dump_lag.write(
+                f"# dump de hilos cuando la interfaz no responde ({time.ctime()})\n")
+            self._archivo_dump_lag.flush()
+        except Exception:
+            self._archivo_dump_lag = None
+        self._timer_latido_ui.start()
         self._timer_reanudar_analisis = QTimer(self)
         self._timer_reanudar_analisis.setSingleShot(True)
         self._timer_reanudar_analisis.setInterval(120000)
@@ -5287,9 +5380,9 @@ class SmartDJPlayer(QMainWindow):
         self.engine.set_efectos_vivo(
             False, False,
             float(self.config_data.get("efectos_intensidad_pct", DEF_EFECTOS_INTENSIDAD_PCT)))
-        self.engine.anclaje_zona_b = (
-            "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
-            else "downbeat")
+        self.engine.anclaje_zona_b = _anclaje_zona_b_configurado(self.config_data)
+        self.engine.anclaje_downbeat_automatico = bool(
+            self.config_data.get("anclaje_downbeat_automatico", DEF_ANCLAJE_DOWNBEAT_AUTOMATICO))
         self.engine.status_update.connect(self.update_status)
         self.engine.main_track_analyzed.connect(self.on_main_analyzed)
         self.engine.pre_load_analyzed.connect(self.on_preload_analyzed)
@@ -5381,7 +5474,9 @@ class SmartDJPlayer(QMainWindow):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(4)
-        self.lbl_deck_a = QLabel(tr("ppal_deck_a_vacio"))
+        self.lbl_deck_a = _LabelClickeable(tr("ppal_deck_a_vacio"))
+        self.lbl_deck_a.setToolTip(tr("ppal_tooltip_deck_etiqueta"))
+        self.lbl_deck_a.clicked.connect(lambda: self._mostrar_tema_en_lista(self.current_index))
         self.waveform_current = WaveformWidget(title=tr("ppal_deck_a_nombre"), is_incoming_deck=False)
         # El Deck A también tiene que enterarse del modo de anclaje elegido
         # en Ajustes (Downbeat/Frase) -- antes solo se lo pasábamos al Deck
@@ -5389,11 +5484,9 @@ class SmartDJPlayer(QMainWindow):
         # defecto de la clase ("downbeat"), sin importar lo que estuviera
         # tildado. Ver también _cambiar_anclaje_zona en ajustes.py, donde
         # se actualiza esto en caliente si el usuario cambia el modo.
-        self.waveform_current.anclaje_zona_b = (
-            "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
-            else "downbeat")
+        self.waveform_current.anclaje_zona_b = _anclaje_zona_b_configurado(self.config_data)
         self.waveform_current.anclaje_downbeat_automatico = bool(
-            self.config_data.get("anclaje_downbeat_automatico", True))
+            self.config_data.get("anclaje_downbeat_automatico", DEF_ANCLAJE_DOWNBEAT_AUTOMATICO))
         self.waveform_current.seek_requested.connect(self.on_waveform_seek)
         self.waveform_current.zona_mezcla_movida.connect(self.on_zona_mezcla_movida)
         grupo_deck_a = QVBoxLayout()
@@ -5402,13 +5495,13 @@ class SmartDJPlayer(QMainWindow):
         grupo_deck_a.addWidget(self.lbl_deck_a)
         grupo_deck_a.addWidget(self.waveform_current, 1)
 
-        self.lbl_deck_b = QLabel(tr("ppal_deck_b_vacio"))
+        self.lbl_deck_b = _LabelClickeable(tr("ppal_deck_b_vacio"))
+        self.lbl_deck_b.setToolTip(tr("ppal_tooltip_deck_etiqueta"))
+        self.lbl_deck_b.clicked.connect(lambda: self._mostrar_tema_en_lista(self.next_index))
         self.waveform_next = WaveformWidget(title=tr("ppal_deck_b_nombre"), is_incoming_deck=True)
-        self.waveform_next.anclaje_zona_b = (
-            "frase" if self.config_data.get("anclaje_zona_b", "downbeat") == "frase"
-            else "downbeat")
+        self.waveform_next.anclaje_zona_b = _anclaje_zona_b_configurado(self.config_data)
         self.waveform_next.anclaje_downbeat_automatico = bool(
-            self.config_data.get("anclaje_downbeat_automatico", True))
+            self.config_data.get("anclaje_downbeat_automatico", DEF_ANCLAJE_DOWNBEAT_AUTOMATICO))
         self.waveform_next.punto_entrada_b_movido.connect(self.on_punto_entrada_b_movido)
         self.waveform_next.setToolTip(tr("ppal_tooltip_waveform_next"))
         grupo_deck_b = QVBoxLayout()
@@ -5836,6 +5929,24 @@ class SmartDJPlayer(QMainWindow):
         if self.lista_separada is not None:
             self.lista_separada.actualizar_cantidad(len(self.playlist))
 
+    def _mostrar_tema_en_lista(self, indice):
+        """Desplaza la lista para dejar self.playlist[indice] en el medio
+        (clic en las etiquetas "Deck A:" / "Deck B:") -- en listas largas
+        el tema que suena o el que viene se pierde de vista. No cambia la
+        selección ni nada más, solo el scroll."""
+        if not (0 <= indice < len(self.playlist)):
+            return
+        fila = self._fila_widget_desde_indice(indice)
+        if fila is None:
+            return
+        item = self.list_widget.item(fila)
+        if item is None:
+            return
+        if item.isHidden():
+            self.update_status(tr("ppal_status_tema_filtrado"))
+            return
+        self.list_widget.scrollToItem(item, QAbstractItemView.PositionAtCenter)
+
     def _actualizar_etiquetas_deck(self):
         if 0 <= self.current_index < len(self.playlist):
             nombre_actual = os.path.basename(self.playlist[self.current_index].ruta)
@@ -5909,7 +6020,7 @@ class SmartDJPlayer(QMainWindow):
             self.waveform_next.clear()
             self._iniciar_progreso_carga(
                 self.next_index, self.playlist[self.next_index].duracion)
-            self.engine.preload_next_track(
+            self._precargar_b(
                 next_track_path, self._fade_duration_para(self.current_index, self.next_index))
 
     def on_waveform_seek(self, target_seconds):
@@ -5955,7 +6066,21 @@ class SmartDJPlayer(QMainWindow):
         # se copia acá para que preload_next_track lo aplique a TODOS los
         # temas que vengan, no solo al que tenía forzado el offset (eso
         # es solo para este archivo puntual, ver más abajo).
-        self.engine.fijo_al_inicio_b = self.waveform_next.fijo_al_inicio_b
+        if self.engine.anclaje_downbeat_automatico:
+            # Automático: lo que se mueva vale solo para ESTE tema; el
+            # próximo vuelve al principio sin excepción.
+            self.engine.fijo_al_inicio_b = False
+            self.engine.offset_b_pegajoso = None
+        elif offset_segundos <= 1.0:
+            # Manual y pegado al principio: los temas nuevos entran
+            # desde el principio.
+            self.engine.fijo_al_inicio_b = True
+            self.engine.offset_b_pegajoso = None
+        else:
+            # Manual en otra posición: se queda ahí para los siguientes.
+            self.engine.fijo_al_inicio_b = False
+            self.engine.offset_b_pegajoso = max(0.0, float(offset_segundos))
+        self.waveform_next.fijo_al_inicio_b = self.engine.fijo_al_inicio_b
         if not (0 <= self.next_index < len(self.playlist)):
             return
         ruta_b = self.playlist[self.next_index].ruta
@@ -5970,7 +6095,10 @@ class SmartDJPlayer(QMainWindow):
         # _reprocesar_b_debounced y la línea se recalcula para la posición
         # nueva.
         self.waveform_next._iniciar_pulso_sincronizar_b()
-        self._reprocesar_b_debounced()
+        # Al arrastrar el recuadro de B se espera 1,5 s desde el último
+        # movimiento antes de volver a preparar el tema: así no se apilan
+        # preparaciones (de 15 a 35 s cada una) mientras se lo acomoda.
+        self._reprocesar_b_debounced(1500)
 
     def _tiempo_mezcla(self) -> float:
         return float(self.config_data.get("tiempo_mezcla", DEF_TIEMPO_MEZCLA))
@@ -6091,8 +6219,8 @@ class SmartDJPlayer(QMainWindow):
     def _guardar_config_debounced(self):
         self._guardar_config_timer.start(400)
 
-    def _reprocesar_b_debounced(self):
-        self._reprocesar_b_timer.start(500)
+    def _reprocesar_b_debounced(self, espera_ms=500):
+        self._reprocesar_b_timer.start(espera_ms)
 
     def _reprocesar_b_por_cambio_ajuste(self):
         if self.engine.is_mixing:
@@ -6102,7 +6230,7 @@ class SmartDJPlayer(QMainWindow):
         self._priorizar_pista_b(self.next_index)
         next_track_path = self.playlist[self.next_index].ruta
         fade_actual = self._fade_duration_para(self.current_index, self.next_index)
-        self.engine.preload_next_track(next_track_path, fade_actual)
+        self._precargar_b(next_track_path, fade_actual)
 
     def on_fade_changed(self, value):
         self.config_data["tiempo_mezcla"] = value
@@ -6193,12 +6321,15 @@ class SmartDJPlayer(QMainWindow):
                 self.next_index = nuevo_next
                 if nuevo_next != -1 and not self.engine.is_mixing:
                     next_track_path = self.playlist[nuevo_next].ruta
-                    self.engine.preload_next_track(
+                    self._precargar_b(
                         next_track_path,
                         self._fade_duration_para(self.current_index, nuevo_next))
                 elif nuevo_next == -1:
                     self.waveform_next.clear()
-        self._reconstruir_widget_lista()
+        # Solo cambian las marcas ✔ del texto: se refrescan las filas en
+        # el lugar (antes se reconstruían los ~700 widgets de la lista
+        # completa, y la interfaz se colgaba varios segundos).
+        self._refrescar_textos_filas()
         self.update_playlist_colors()
         if self.lista_separada is not None:
             self.lista_separada.set_estado_boton_aleatorio(self.modo_aleatorio_activo)
@@ -7062,7 +7193,7 @@ class SmartDJPlayer(QMainWindow):
             return
         if nuevo_next != -1:
             next_track_path = self.playlist[nuevo_next].ruta
-            self.engine.preload_next_track(
+            self._precargar_b(
                 next_track_path, self._fade_duration_para(self.current_index, nuevo_next))
         else:
             self.waveform_next.clear()
@@ -7270,23 +7401,32 @@ class SmartDJPlayer(QMainWindow):
     def _texto_duracion_item(self, pista) -> str:
         return _formatear_duracion(pista.duracion) if pista.duracion is not None else ""
 
-    def _agregar_item_pista(self, pista):
+    def _crear_widget_pista(self, pista):
         widget = FilaTemaWidget()
         widget.lbl_texto.set_texto_completo(self._texto_principal_item(pista))
         widget.lbl_duracion.setText(self._texto_duracion_item(pista))
         widget.set_saltear_silencioso(pista.saltear)
         widget.saltear_cambiado.connect(
             lambda valor, p=pista: self.on_saltear_toggled(p, valor))
-        item = QListWidgetItem()
-        item.setSizeHint(QSize(0, 22))
-        self.list_widget.addItem(item)
-        self.list_widget.setItemWidget(item, widget)
+        return widget
 
-    def _agregar_item_separador(self, info):
+    def _crear_widget_separador(self, info):
         texto_duracion = _formatear_duracion_separador(info["duracion_total"])
         widget = SeparadorCarpetaWidget(info["nombre"], info["cantidad"], texto_duracion)
         widget.set_color(
             self._color_lista("separador_fondo"), self._color_lista("separador_texto"))
+        return widget
+
+    def _agregar_item_pista(self, pista, pendientes=None):
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 22))
+        self.list_widget.addItem(item)
+        if pendientes is not None:
+            pendientes.append((item, lambda p=pista: self._crear_widget_pista(p)))
+        else:
+            self.list_widget.setItemWidget(item, self._crear_widget_pista(pista))
+
+    def _agregar_item_separador(self, info, pendientes=None):
         item = QListWidgetItem()
         item.setSizeHint(QSize(0, 28))
         # Es seleccionable (para poder pararse en el separador y
@@ -7297,7 +7437,10 @@ class SmartDJPlayer(QMainWindow):
         # update_playlist_colors ya lo tratan aparte por ser None en
         # _filas_widget).
         self.list_widget.addItem(item)
-        self.list_widget.setItemWidget(item, widget)
+        if pendientes is not None:
+            pendientes.append((item, lambda i=info: self._crear_widget_separador(i)))
+        else:
+            self.list_widget.setItemWidget(item, self._crear_widget_separador(info))
 
     def _recalcular_separadores(self):
         """Recalcula, a partir de self.playlist y self._carpeta_de_pista
@@ -7331,17 +7474,56 @@ class SmartDJPlayer(QMainWindow):
         self._recalcular_separadores()
         self._ignorar_orden_cambiado = True
         try:
+            self.list_widget.setUpdatesEnabled(False)
             self.list_widget.clear()
             self._filas_widget = []
+            # Primero se agregan TODOS los items y recién después se les
+            # cuelga el widget: intercalar addItem() y setItemWidget()
+            # hace que Qt recalcule el diseño de la lista en cada fila
+            # (con ~740 temas la pantalla quedaba ~8 s sin responder; en
+            # dos pasos tarda una fracción).
+            pendientes = []
             for indice, pista in enumerate(self.playlist):
                 info_separador = self._separadores_por_pista.get(id(pista))
                 if info_separador is not None:
-                    self._agregar_item_separador(info_separador)
+                    self._agregar_item_separador(info_separador, pendientes)
                     self._filas_widget.append(None)
-                self._agregar_item_pista(pista)
+                self._agregar_item_pista(pista, pendientes)
                 self._filas_widget.append(indice)
+            # Los widgets se cuelgan de a tandas cortas para no dejar la
+            # pantalla congelada: crear/colgar ~740 widgets de una sola
+            # vez tardaba varios segundos en Windows. Mientras tanto la
+            # lista ya está completa (filas y orden); a cada fila le
+            # aparece su contenido en cuestión de instantes.
+            self._gen_reconstruccion = getattr(self, "_gen_reconstruccion", 0) + 1
+            self._widgets_pendientes = pendientes
+            self._pos_widgets_pendientes = 0
         finally:
+            self.list_widget.setUpdatesEnabled(True)
             self._ignorar_orden_cambiado = False
+        QTimer.singleShot(0, lambda g=self._gen_reconstruccion: self._colgar_widgets_en_tandas(g))
+
+    def _colgar_widgets_en_tandas(self, generacion):
+        if generacion != getattr(self, "_gen_reconstruccion", 0):
+            return
+        pendientes = self._widgets_pendientes
+        t0 = time.monotonic()
+        try:
+            pos = self._pos_widgets_pendientes
+            while pos < len(pendientes) and time.monotonic() - t0 < 0.04:
+                item, fabrica = pendientes[pos]
+                self.list_widget.setItemWidget(item, fabrica())
+                pos += 1
+            self._pos_widgets_pendientes = pos
+            self.update_playlist_colors()
+        except RuntimeError:
+            # La lista se vació mientras tanto (items ya destruidos).
+            self._widgets_pendientes = []
+            return
+        if self._pos_widgets_pendientes < len(pendientes):
+            QTimer.singleShot(0, lambda g=generacion: self._colgar_widgets_en_tandas(g))
+        else:
+            self._widgets_pendientes = []
 
     def _fila_widget_desde_indice(self, indice):
         """Inversa de _indice_playlist_desde_fila: busca en qué fila
@@ -7363,6 +7545,28 @@ class SmartDJPlayer(QMainWindow):
         if item is None:
             return None
         return self.list_widget.itemWidget(item)
+
+    def _tick_latido_ui(self):
+        ahora = time.monotonic()
+        demora = ahora - self._ultimo_latido_ui
+        self._ultimo_latido_ui = ahora
+        if self._archivo_dump_lag is not None:
+            try:
+                import faulthandler
+                faulthandler.dump_traceback_later(
+                    1.5, repeat=True, file=self._archivo_dump_lag)
+            except Exception:
+                pass
+        if demora > 0.30:
+            try:
+                mezclando = bool(getattr(self.engine, "is_mixing", False))
+            except Exception:
+                mezclando = None
+            print(f"[ui-lag] la interfaz estuvo {demora:.2f}s sin responder "
+                  f"(mezclando={mezclando}, "
+                  f"preparando_B={self._progreso_carga_indice is not None}, "
+                  f"analisis_lista_hilos_ocupados="
+                  f"{getattr(self.analizador_fondo, '_hilos_ocupados', '?')})")
 
     def _pausar_analisis_fondo_para_b(self):
         """Pausa el análisis de fondo de la lista (BPM/tono para ordenar)
@@ -7521,6 +7725,23 @@ class SmartDJPlayer(QMainWindow):
                   f"ratio_anterior={anterior:.4f} ratio_nuevo={nuevo:.4f}")
         self._progreso_carga_indice = None
         self._progreso_carga_duracion_audio_inicio = None
+
+    def _refrescar_textos_filas(self):
+        """Reescribe el texto de todas las filas de tema en el lugar,
+        sin recrear los widgets (barato, conserva scroll y selección)."""
+        self.list_widget.setUpdatesEnabled(False)
+        try:
+            for fila, indice in enumerate(self._filas_widget):
+                if indice is None or not (0 <= indice < len(self.playlist)):
+                    continue
+                item = self.list_widget.item(fila)
+                widget = self.list_widget.itemWidget(item) if item else None
+                if widget is None:
+                    continue
+                widget.lbl_texto.set_texto_completo(
+                    self._texto_principal_item(self.playlist[indice]))
+        finally:
+            self.list_widget.setUpdatesEnabled(True)
 
     def _actualizar_item_pista(self, indice, pista):
         fila = self._fila_widget_desde_indice(indice)
@@ -7709,6 +7930,7 @@ class SmartDJPlayer(QMainWindow):
             self._filas_widget = []
             self.current_index = -1
             self.next_index = -1
+            self._gen_reconstruccion = getattr(self, "_gen_reconstruccion", 0) + 1
             self.list_widget.clear()
             self.waveform_current.clear()
             self.waveform_next.clear()
@@ -8107,6 +8329,22 @@ class SmartDJPlayer(QMainWindow):
             self.waveform_current.set_progress(posicion)
         self.perform_auto_preload()
 
+    def _precargar_b(self, ruta, fade):
+        """Pide la precarga del tema B al motor, pero antes borra el
+        gráfico del B anterior (si no se está mezclando) para que no
+        quede la onda del tema viejo hasta que llegue la del nuevo."""
+        # Solo se borra si es OTRO tema: si es el mismo (se movió el
+        # recuadro de B, cambió un ajuste, etc.) se reprocesa y la onda
+        # actual se queda en pantalla hasta que llegue la nueva.
+        try:
+            if (not self.engine.is_mixing
+                    and getattr(self, "_ruta_b_precargada", None) != ruta):
+                self.waveform_next.clear()
+        except Exception:
+            pass
+        self._ruta_b_precargada = ruta
+        self.engine.preload_next_track(ruta, fade)
+
     def perform_auto_preload(self):
         nuevo_next = self._siguiente_indice_reproducible(self.current_index)
         if nuevo_next != -1:
@@ -8119,7 +8357,7 @@ class SmartDJPlayer(QMainWindow):
                 self._preload_disparado_para = clave
                 self._iniciar_progreso_carga(
                     self.next_index, self.playlist[self.next_index].duracion)
-                self.engine.preload_next_track(next_track_path, fade_actual)
+                self._precargar_b(next_track_path, fade_actual)
         else:
             self.next_index = -1
             self.waveform_next.clear()
@@ -8466,7 +8704,7 @@ class SmartDJPlayer(QMainWindow):
         self.update_status("⏮ Preparando el tema anterior para mezclar...")
         self._iniciar_progreso_carga(
             target_idx, self.playlist[target_idx].duracion)
-        self.engine.preload_next_track(target_path, fade_para_anterior)
+        self._precargar_b(target_path, fade_para_anterior)
 
     def _ejecutar_mezcla_anterior(self):
         target_idx = self._anterior_indice_reproducible(self.current_index)
@@ -8496,15 +8734,23 @@ class SmartDJPlayer(QMainWindow):
                           y_mono_completo, duracion_completo, beat_times_completo,
                           phrase_boundaries_completo, datos_visuales_completo,
                           downbeat_times_completo, fase_downbeat_completo, offset_entrada_b):
+        _t0 = time.monotonic()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.current_index = target_index
         self._mezcla_disparada = False
         self._rectangulo_en_vivo = False
         self._rectangulo_fijo_por_frase = False
+        # Lo que se movió a mano en el recuadro de B valía solo para el
+        # tema que acaba de pasar al Deck A: se suelta para que el
+        # próximo B siga la regla de Automático/Manual (en Manual la
+        # posición "pegajosa" ya quedó guardada aparte).
+        self.engine.offset_entrada_b_forzado = None
+        self.engine.ruta_offset_entrada_b_forzado = None
         self.fraccion_enganche = float(self.config_data.get("fraccion_recuadro_a", 0.5))
         self._registrar_en_historial(file_path)
         self.update_playlist_colors()
+        _t_colores = time.monotonic() - _t0
 
         self.waveform_current.peaks, self.waveform_current.peaks_graves, \
             self.waveform_current.peaks_medios, self.waveform_current.peaks_agudos = datos_visuales
@@ -8524,14 +8770,21 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_current.kick_marker_time = -1.0
         self.waveform_current.offset_reproduccion_en_grafico = 0.0
         self.waveform_current.factor_tempo_grafico = 1.0
+        _t1 = time.monotonic()
         self.waveform_current._regenerar_cache_bandas()
+        _t_bandas = time.monotonic() - _t1
         self._aplicar_punto_enganche_configurado()
         self._posicionar_recuadro_a_en_frase_si_hace_falta()
         self.waveform_current.is_active = True
         self._aplicar_recorte_silencio_a_waveform(self.waveform_current)
         self.waveform_current.set_progress(elapsed_time)
         self.waveform_next.clear()
+        _t2 = time.monotonic()
         self.perform_auto_preload()
+        print(f"[mix-completed] hilo de interfaz bloqueado: "
+              f"colores_lista={_t_colores:.2f}s cache_bandas={_t_bandas:.2f}s "
+              f"auto_preload={time.monotonic() - _t2:.2f}s "
+              f"total={time.monotonic() - _t0:.2f}s (filas={self.list_widget.count()})")
 
     def on_tempo_restaurado(self, beat_times, phrase_boundaries, downbeat_times, fase_downbeat,
                              bpm, duration):

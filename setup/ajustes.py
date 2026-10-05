@@ -67,17 +67,17 @@ DEF_NIVEL_NORMALIZADOR_DB    = -5      # dB
 
 # --- ✨ Brillo y golpe ---
 DEF_BRILLO_AUTOMATICO        = True
-DEF_TECHO_BRILLO_PCT         = 2.0    # %
-DEF_GOLPE_REFERENCIA_PCT     = 50.0   # %
+DEF_TECHO_BRILLO_PCT         = 3.0    # %
+DEF_GOLPE_REFERENCIA_PCT     = 80.0   # %
 
 # --- 🎚️ Cruce ---
 # Reemplazan al viejo pivote único: 2 puntos independientes (fracción
 # 0.0-0.95 del cruce) -- ver _perfil_cruce_ab en Principal.py. En 0.0 los
 # dos, el cruce es parejo en todo el tramo (de punta a punta).
-DEF_PUNTO_A_CRUCE            = 0.14
+DEF_PUNTO_A_CRUCE            = 0.50
 DEF_PUNTO_B_CRUCE            = 0.0
-DEF_TIEMPO_MEZCLA            = 14     # s
-DEF_FADE_MINIMO_SEG          = 10     # s (70% de DEF_TIEMPO_MEZCLA, ver _cambiar_tiempo_mezcla)
+DEF_TIEMPO_MEZCLA            = 12     # s
+DEF_FADE_MINIMO_SEG          = 8     # s (70% de DEF_TIEMPO_MEZCLA, ver _cambiar_tiempo_mezcla)
 # Techo fijo de la regla de tiempo en el gráfico de Cruce (el slider
 # verde va de 0 a esto). No es un parámetro del motor, solo de la UI.
 TIEMPO_MAXIMO_GRAFICO_CRUCE  = 20.0    # s
@@ -88,12 +88,12 @@ DEF_EFECTO_ECO_ACTIVO        = False
 DEF_EFECTOS_INTENSIDAD_PCT   = 50     # %
 
 # --- 🎯 Zona de mezcla ---
-DEF_ANCLAJE_ZONA_B           = "downbeat"
-# Solo tiene efecto cuando DEF_ANCLAJE_ZONA_B (o lo que el usuario haya
-# elegido) es "downbeat" -- Automático (True): los recuadros se ubican y
-# se pueden arrastrar libremente, como ya funciona. Manual (False): el
-# recuadro del Deck A queda siempre fijo al fondo (el final del tema) y
-# el del Deck B siempre fijo al principio, sin arrastre.
+DEF_ANCLAJE_ZONA_B           = "Frase"
+# Vale con Frase y con Downbeat. Automático (True): en cada tema nuevo el
+# recuadro del Deck B arranca siempre en el principio del tema; si se lo
+# mueve, vale solo para ese tema. Manual (False): el recuadro de B se
+# queda donde lo dejó el usuario para los temas siguientes (y si lo pegó
+# al principio, los temas nuevos entran desde el principio).
 DEF_ANCLAJE_DOWNBEAT_AUTOMATICO = True
 DEF_ORDEN_CONSIDERA_ENERGIA  = False
 # Recortar silencio final: al analizar cada tema, se detecta dónde
@@ -1144,20 +1144,20 @@ class ConfiguracionTeclasDialog(QDialog):
         self.combo_anclaje_zona.setToolTip("Punto de anclaje para la entrada de B.")
         self.combo_anclaje_zona.addItems(["Downbeat", "Frase"])
         valor_actual = self.player.config_data.get("anclaje_zona_b", DEF_ANCLAJE_ZONA_B)
-        self.combo_anclaje_zona.setCurrentText("Frase" if valor_actual == "frase" else "Downbeat")
+        self.combo_anclaje_zona.setCurrentText(
+            "Frase" if str(valor_actual).strip().lower() == "frase" else "Downbeat")
         fila.addWidget(self.combo_anclaje_zona, 1)
         v.addLayout(fila)
 
         self.chk_anclaje_automatico = QCheckBox(tr("ajustes_chk_anclaje_auto_man"))
         self.chk_anclaje_automatico.setToolTip(
-            "Solo aplica con Anclaje B = Downbeat.\n"
-            "Tildado (Manual): los recuadros de mezcla de los dos decks se\n"
-            "ubican y se arrastran libremente, como ya funciona.\n"
-            "Destildado (Automático): al cargar cada tema, el recuadro del\n"
-            "Deck A arranca ubicado al fondo (el final del tema) y el del\n"
-            "Deck B al principio -- pero en ambos casos vos podés moverlos\n"
-            "arrastrando o cambiando de tema con los botones de siguiente\n"
-            "y anterior, exactamente igual que antes.")
+            "Tildado (Automático): en cada tema nuevo el recuadro del Deck B\n"
+            "arranca SIEMPRE en el principio del tema (con Frase o con\n"
+            "Downbeat). Si lo movés, se queda ahí solo durante ese tema; el\n"
+            "próximo vuelve al principio.\n"
+            "Destildado (Manual): el recuadro del Deck B se queda donde lo\n"
+            "dejaste para los temas siguientes; si lo pegás al principio,\n"
+            "los temas nuevos entran siempre desde el principio.")
         self.chk_anclaje_automatico.setChecked(
             bool(self.player.config_data.get(
                 "anclaje_downbeat_automatico", DEF_ANCLAJE_DOWNBEAT_AUTOMATICO)))
@@ -1196,8 +1196,7 @@ class ConfiguracionTeclasDialog(QDialog):
         # El tilde Automático/Manual solo tiene sentido con Downbeat --
         # con Frase se deshabilita (queda gris) para no sugerir que hace
         # algo que en ese modo no hace nada.
-        self.chk_anclaje_automatico.setEnabled(
-            self.combo_anclaje_zona.currentText() == "Downbeat")
+        self.chk_anclaje_automatico.setEnabled(True)
 
     def _grupo_orden(self):
         grupo = self._registrar_i18n(QGroupBox(tr("ajustes_orden_titulo")), "ajustes_orden_titulo")
@@ -2264,6 +2263,10 @@ class ConfiguracionTeclasDialog(QDialog):
         guardar_config_app(self.player.config_data)
         self.player.waveform_next.anclaje_downbeat_automatico = bool(tildado)
         self.player.waveform_current.anclaje_downbeat_automatico = bool(tildado)
+        self.player.engine.anclaje_downbeat_automatico = bool(tildado)
+        # Cambió la regla de entrada de B: se vuelve a preparar el B
+        # actual con la regla nueva.
+        self.player._reprocesar_b_debounced()
         # Resetea la posición manual de los dos recuadros para que se
         # vuelvan a calcular ya con el modo (Automático/Manual) recién
         # elegido, en vez de quedarse pegados en donde habían quedado.
@@ -2322,10 +2325,37 @@ class ConfiguracionTeclasDialog(QDialog):
         self.combo_estilo.blockSignals(False)
 
     def _restaurar_todo_a_valores_default(self):
+        import time as _time
+        _marcas = []
+
+        def _m(nombre):
+            _marcas.append((nombre, _time.perf_counter()))
+
         lbl_real = self.lbl_confirmacion
         self.lbl_confirmacion = QLabel("")
+        # Evita repintados intermedios de la lista mientras se aplican
+        # todos los valores de fábrica.
+        _lista = getattr(self.player, "list_widget", None)
+        if _lista is not None:
+            _lista.setUpdatesEnabled(False)
+        try:
+            self._restaurar_todo_interno(_m)
+        finally:
+            if _lista is not None:
+                _lista.setUpdatesEnabled(True)
+        _m("fin")
+        print("[ajustes] Restaurar todo: " + ", ".join(
+            f"{_marcas[i][0]}={_marcas[i + 1][1] - _marcas[i][1]:.2f}s"
+            for i in range(len(_marcas) - 1)))
+        self.lbl_confirmacion = lbl_real
+        self.lbl_confirmacion.setText("✅ Ajustes restaurado por completo a valores de fábrica")
+        QTimer.singleShot(2800, lambda: self.lbl_confirmacion.setText(""))
 
-        # --- Teclas de mezcla ---
+    def _restaurar_todo_interno(self, _m):
+        """Cuerpo de _restaurar_todo_a_valores_default (separado para
+        poder envolverlo con el control de repintado y la medición)."""
+
+        _m("Teclas de mezcla")
         tecla_ant_txt = DEF_TECLA_MEZCLAR_ANTERIOR or "Sin asignar"
         tecla_sig_txt = DEF_TECLA_MEZCLAR_SIGUIENTE or "Sin asignar"
         self.combo_anterior.blockSignals(True)
@@ -2337,14 +2367,14 @@ class ConfiguracionTeclasDialog(QDialog):
         self._cambiar("anterior", tecla_ant_txt)
         self._cambiar("siguiente", tecla_sig_txt)
 
-        # --- Volumen ---
+        _m("Volumen")
         self.sel_nivel_normalizador.setValue(DEF_NIVEL_NORMALIZADOR_DB, disparar=False)
         self.chk_normalizar.blockSignals(True)
         self.chk_normalizar.setChecked(DEF_NORMALIZAR_VOLUMEN)
         self.chk_normalizar.blockSignals(False)
         self._cambiar_normalizador()
 
-        # --- Brillo y golpe ---
+        _m("Brillo y golpe")
         self.sel_brillo_set.setValue(DEF_TECHO_BRILLO_PCT, disparar=False)
         self.sel_golpe_set.setValue(DEF_GOLPE_REFERENCIA_PCT, disparar=False)
         self.chk_brillo_automatico.blockSignals(True)
@@ -2352,7 +2382,7 @@ class ConfiguracionTeclasDialog(QDialog):
         self.chk_brillo_automatico.blockSignals(False)
         self._cambiar_brillo()
 
-        # --- Cruce ---
+        _m("Cruce")
         self.sld_punto_a.blockSignals(True)
         self.sld_punto_a.setValue(int(round(DEF_PUNTO_A_CRUCE * 100)))
         self.sld_punto_a.blockSignals(False)
@@ -2365,7 +2395,7 @@ class ConfiguracionTeclasDialog(QDialog):
         self.sel_fade_min.setValue(DEF_FADE_MINIMO_SEG, disparar=False)
         self._cambiar_fade_min(DEF_FADE_MINIMO_SEG)
 
-        # --- Efectos en vivo ---
+        _m("Efectos en vivo")
         self.chk_efecto_filtro.blockSignals(True)
         self.chk_efecto_filtro.setChecked(DEF_EFECTO_FILTRO_ACTIVO)
         self.chk_efecto_filtro.blockSignals(False)
@@ -2379,7 +2409,11 @@ class ConfiguracionTeclasDialog(QDialog):
         self._cambiar_efectos_vivo()
         self._cambiar_intensidad_efectos(DEF_EFECTOS_INTENSIDAD_PCT)
 
-        # --- Orden y carga ---
+        _m("Orden y carga")
+        # Se fija primero el criterio de energía (sin reordenar) para que
+        # la lista se ordene UNA sola vez, y no una por cada ajuste.
+        self.player.config_data["orden_considera_energia"] = bool(DEF_ORDEN_CONSIDERA_ENERGIA)
+        _ESTADO_ORDEN_ENERGIA["activo"] = bool(DEF_ORDEN_CONSIDERA_ENERGIA)
         orden_txt = "Tono" if DEF_ORDENAR_POR_TONO else "BPM"
         self.combo_orden_lista.blockSignals(True)
         self.combo_orden_lista.setCurrentText(orden_txt)
@@ -2391,8 +2425,8 @@ class ConfiguracionTeclasDialog(QDialog):
         self.combo_carga.blockSignals(False)
         self._cambiar_modo_carga(idx_carga)
 
-        # --- Zona de mezcla ---
-        anclaje_txt = "Frase" if DEF_ANCLAJE_ZONA_B == "frase" else "Downbeat"
+        _m("Zona de mezcla")
+        anclaje_txt = "Frase" if str(DEF_ANCLAJE_ZONA_B).strip().lower() == "frase" else "Downbeat"
         self.combo_anclaje_zona.blockSignals(True)
         self.combo_anclaje_zona.setCurrentText(anclaje_txt)
         self.combo_anclaje_zona.blockSignals(False)
@@ -2404,30 +2438,31 @@ class ConfiguracionTeclasDialog(QDialog):
         self.chk_orden_energia.blockSignals(True)
         self.chk_orden_energia.setChecked(DEF_ORDEN_CONSIDERA_ENERGIA)
         self.chk_orden_energia.blockSignals(False)
-        self._cambiar_orden_energia(DEF_ORDEN_CONSIDERA_ENERGIA)
+        self.player.config_data["orden_considera_energia"] = bool(DEF_ORDEN_CONSIDERA_ENERGIA)
         self.chk_recortar_silencio.blockSignals(True)
         self.chk_recortar_silencio.setChecked(DEF_RECORTAR_SILENCIO_FINAL)
         self.chk_recortar_silencio.blockSignals(False)
         self._cambiar_recortar_silencio(DEF_RECORTAR_SILENCIO_FINAL)
 
-        # --- Golpe seco (activar + potencia; la frecuencia es automática) ---
+        _m("Golpe seco (activar + potencia; la frecuencia es automática)")
         self.sel_golpe_seco_potencia.setValue(DEF_GOLPE_SECO_POTENCIA_PCT, disparar=False)
         self.chk_golpe_seco.blockSignals(True)
         self.chk_golpe_seco.setChecked(DEF_GOLPE_SECO_ACTIVO)
         self.chk_golpe_seco.blockSignals(False)
         self._cambiar_golpe_seco()
 
-        # --- Estilo visual ---
+        _m("Estilo visual")
         self._asegurar_skin_default_existe()
         if DEF_ESTILO_VISUAL in getattr(self, "_estilos_disponibles", {}):
             self.combo_estilo.blockSignals(True)
             self.combo_estilo.setCurrentText(DEF_ESTILO_VISUAL)
             self.combo_estilo.blockSignals(False)
-            self._cambiar_estilo(DEF_ESTILO_VISUAL)
+            # Re-aplicar el estilo global repinta TODOS los widgets (la
+            # lista entera incluida) y tardaba ~2.5 s; si el estilo
+            # activo ya es el de fábrica no hay nada que cambiar.
+            if self.player.config_data.get("estilo_visual") != DEF_ESTILO_VISUAL:
+                self._cambiar_estilo(DEF_ESTILO_VISUAL)
 
-        self.lbl_confirmacion = lbl_real
-        self.lbl_confirmacion.setText("✅ Ajustes restaurado por completo a valores de fábrica")
-        QTimer.singleShot(2800, lambda: self.lbl_confirmacion.setText(""))
 
     def _confirmar(self):
         self.lbl_confirmacion.setText("✅ Guardado")

@@ -285,6 +285,7 @@ class FilaTemaWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setObjectName("filaTema")
         self.setAttribute(Qt.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 2, 10, 2)
@@ -312,10 +313,26 @@ class FilaTemaWidget(QWidget):
         self.chk_saltear.blockSignals(False)
 
     def set_color(self, fondo: QColor, texto: QColor):
+        # update_playlist_colors le pasa los colores a TODAS las filas cada
+        # vez que cambia algo (fin de una mezcla, doble clic, etc.); con
+        # cientos de temas, reaplicar tres hojas de estilo por fila
+        # congelaba la pantalla un rato. Si los colores son los mismos que
+        # ya tiene, no hay nada que hacer.
+        clave = (fondo.rgba(), texto.rgba())
+        if getattr(self, "_clave_color", None) == clave:
+            return
+        self._clave_color = clave
         self._fondo_qcolor = QColor(fondo)
         color_fondo = f"rgb({fondo.red()}, {fondo.green()}, {fondo.blue()})"
         color_texto = f"rgb({texto.red()}, {texto.green()}, {texto.blue()})"
-        self.setStyleSheet(f"background-color: {color_fondo};")
+        # El fondo va SOLO para la fila (#filaTema): una regla sin selector
+        # se hereda a todos los hijos, incluido el globito de ayuda del
+        # cuadradito de saltear, que quedaba con este fondo oscuro pero con
+        # el texto negro por defecto (ilegible). Se le da además un color
+        # propio al globito.
+        self.setStyleSheet(
+            f"#filaTema {{ background-color: {color_fondo}; }} "
+            "QToolTip { color: #f0f0f0; background-color: #202020; border: 1px solid #8a8a8a; }")
         self.lbl_texto.setStyleSheet(f"color: {color_texto}; background: transparent;")
         self.lbl_duracion.setStyleSheet(f"color: {color_texto}; background: transparent;")
 
@@ -354,6 +371,7 @@ class SeparadorCarpetaWidget(QWidget):
 
     def __init__(self, nombre: str, cantidad: int, duracion_total_texto: str):
         super().__init__()
+        self.setObjectName("separadorCarpeta")
         self.setAttribute(Qt.WA_StyledBackground, True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 10, 2)
@@ -367,9 +385,15 @@ class SeparadorCarpetaWidget(QWidget):
         layout.addWidget(self.lbl_info)
 
     def set_color(self, fondo: QColor, texto: QColor):
+        clave = (fondo.rgba(), texto.rgba())   # ver FilaTemaWidget.set_color
+        if getattr(self, "_clave_color", None) == clave:
+            return
+        self._clave_color = clave
         color_fondo = f"rgb({fondo.red()}, {fondo.green()}, {fondo.blue()})"
         color_texto = f"rgb({texto.red()}, {texto.green()}, {texto.blue()})"
-        self.setStyleSheet(f"background-color: {color_fondo};")
+        self.setStyleSheet(
+            f"#separadorCarpeta {{ background-color: {color_fondo}; }} "
+            "QToolTip { color: #f0f0f0; background-color: #202020; border: 1px solid #8a8a8a; }")
         self.lbl_nombre.setStyleSheet(f"font-weight: bold; color: {color_texto}; background: transparent;")
         self.lbl_info.setStyleSheet(f"color: {color_texto}; background: transparent;")
 
