@@ -5292,33 +5292,6 @@ class SmartDJPlayer(QMainWindow):
         # en on_preload_analyzed; este timer es solo un seguro por si
         # esa preparación falla o se cancela y nunca llega ese aviso, así
         # el análisis no se queda pausado para siempre.
-        # Medidor de "pantalla colgada": un timer de 50 ms que anota en la
-        # consola cuando tarda mucho más en volver a ejecutarse, o sea
-        # cuando el hilo de la interfaz estuvo ocupado/bloqueado (ver
-        # _tick_latido_ui). Sirve para encontrar qué trababa la parte
-        # visual al terminar una mezcla.
-        self._ultimo_latido_ui = time.monotonic()
-        self._timer_latido_ui = QTimer(self)
-        self._timer_latido_ui.setInterval(50)
-        self._timer_latido_ui.timeout.connect(self._tick_latido_ui)
-        # faulthandler.dump_traceback_later vuelca la pila de TODOS los
-        # hilos a un archivo si el latido no se renueva en 1.5 s, aunque
-        # el hilo que tiene la interfaz trabado esté dentro de código C
-        # (que no suelta el GIL). Así se ve QUÉ función congela la
-        # pantalla. Archivo: ~/.py_dj_cache/ui_lag_dump.txt
-        self._archivo_dump_lag = None
-        try:
-            import faulthandler
-            _dir_dump = os.path.join(os.path.expanduser("~"), ".py_dj_cache")
-            os.makedirs(_dir_dump, exist_ok=True)
-            self._archivo_dump_lag = open(
-                os.path.join(_dir_dump, "ui_lag_dump.txt"), "w", encoding="utf-8")
-            self._archivo_dump_lag.write(
-                f"# dump de hilos cuando la interfaz no responde ({time.ctime()})\n")
-            self._archivo_dump_lag.flush()
-        except Exception:
-            self._archivo_dump_lag = None
-        self._timer_latido_ui.start()
         self._timer_reanudar_analisis = QTimer(self)
         self._timer_reanudar_analisis.setSingleShot(True)
         self._timer_reanudar_analisis.setInterval(120000)
@@ -5760,15 +5733,6 @@ class SmartDJPlayer(QMainWindow):
                 and self.lista_separada.lado_pegado is not None
                 and self.lista_separada.isVisible()):
             self.lista_separada.reposicionar_segun_pegado()
-
-    def elegir_carpeta(self):
-        carpeta = QFileDialog.getExistingDirectory(
-            self, "Elegir carpeta con música",
-            self.settings.value("last_folder", os.path.expanduser("~")))
-        if not carpeta:
-            return
-        self.settings.setValue("last_folder", carpeta)
-        self.load_folder(carpeta)
 
     # ============================================================
     #  Paleta de colores de la lista (viene de la skin activa)
@@ -6616,26 +6580,6 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_current.is_active = False
         self.engine.play_initial(next_file)
         self._mezcla_disparada = False
-
-    def load_folder(self, folder_path):
-        # Igual que al arrastrar una carpeta a la lista (ver
-        # DropListWidget.dropEvent): cada tema se agrupa por la carpeta
-        # que lo contiene directamente, no por la de nivel superior.
-        grupos = []
-        total = 0
-        for root, dirs, filenames in os.walk(folder_path):
-            dirs.sort(key=str.lower)
-            archivos = [os.path.join(root, f) for f in filenames
-                        if f.lower().endswith(EXTENSIONES_AUDIO_SOPORTADAS)]
-            if archivos:
-                nombre = os.path.basename(root.rstrip("/\\")) or root
-                grupos.append((root, nombre, archivos))
-                total += len(archivos)
-        if not total:
-            self.update_status(tr("ppal_status_no_audios").format(carpeta=folder_path))
-            return
-        self.settings.setValue("last_folder", folder_path)
-        self.agregar_grupos_a_playlist(grupos)
 
     def _crear_pista(self, ruta, indice):
         duracion = None
@@ -7545,28 +7489,6 @@ class SmartDJPlayer(QMainWindow):
         if item is None:
             return None
         return self.list_widget.itemWidget(item)
-
-    def _tick_latido_ui(self):
-        ahora = time.monotonic()
-        demora = ahora - self._ultimo_latido_ui
-        self._ultimo_latido_ui = ahora
-        if self._archivo_dump_lag is not None:
-            try:
-                import faulthandler
-                faulthandler.dump_traceback_later(
-                    1.5, repeat=True, file=self._archivo_dump_lag)
-            except Exception:
-                pass
-        if demora > 0.30:
-            try:
-                mezclando = bool(getattr(self.engine, "is_mixing", False))
-            except Exception:
-                mezclando = None
-            print(f"[ui-lag] la interfaz estuvo {demora:.2f}s sin responder "
-                  f"(mezclando={mezclando}, "
-                  f"preparando_B={self._progreso_carga_indice is not None}, "
-                  f"analisis_lista_hilos_ocupados="
-                  f"{getattr(self.analizador_fondo, '_hilos_ocupados', '?')})")
 
     def _pausar_analisis_fondo_para_b(self):
         """Pausa el análisis de fondo de la lista (BPM/tono para ordenar)
@@ -8734,7 +8656,6 @@ class SmartDJPlayer(QMainWindow):
                           y_mono_completo, duracion_completo, beat_times_completo,
                           phrase_boundaries_completo, datos_visuales_completo,
                           downbeat_times_completo, fase_downbeat_completo, offset_entrada_b):
-        _t0 = time.monotonic()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.current_index = target_index
@@ -8750,7 +8671,6 @@ class SmartDJPlayer(QMainWindow):
         self.fraccion_enganche = float(self.config_data.get("fraccion_recuadro_a", 0.5))
         self._registrar_en_historial(file_path)
         self.update_playlist_colors()
-        _t_colores = time.monotonic() - _t0
 
         self.waveform_current.peaks, self.waveform_current.peaks_graves, \
             self.waveform_current.peaks_medios, self.waveform_current.peaks_agudos = datos_visuales
@@ -8770,21 +8690,14 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_current.kick_marker_time = -1.0
         self.waveform_current.offset_reproduccion_en_grafico = 0.0
         self.waveform_current.factor_tempo_grafico = 1.0
-        _t1 = time.monotonic()
         self.waveform_current._regenerar_cache_bandas()
-        _t_bandas = time.monotonic() - _t1
         self._aplicar_punto_enganche_configurado()
         self._posicionar_recuadro_a_en_frase_si_hace_falta()
         self.waveform_current.is_active = True
         self._aplicar_recorte_silencio_a_waveform(self.waveform_current)
         self.waveform_current.set_progress(elapsed_time)
         self.waveform_next.clear()
-        _t2 = time.monotonic()
         self.perform_auto_preload()
-        print(f"[mix-completed] hilo de interfaz bloqueado: "
-              f"colores_lista={_t_colores:.2f}s cache_bandas={_t_bandas:.2f}s "
-              f"auto_preload={time.monotonic() - _t2:.2f}s "
-              f"total={time.monotonic() - _t0:.2f}s (filas={self.list_widget.count()})")
 
     def on_tempo_restaurado(self, beat_times, phrase_boundaries, downbeat_times, fase_downbeat,
                              bpm, duration):

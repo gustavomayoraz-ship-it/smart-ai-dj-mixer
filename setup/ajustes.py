@@ -63,7 +63,7 @@ DEF_TECLA_MEZCLAR_SIGUIENTE  = "F2"
 
 # --- 🔊 Volumen ---
 DEF_NORMALIZAR_VOLUMEN       = True
-DEF_NIVEL_NORMALIZADOR_DB    = -5      # dB
+DEF_NIVEL_NORMALIZADOR_DB    = -4      # dB
 
 # --- ✨ Brillo y golpe ---
 DEF_BRILLO_AUTOMATICO        = True
@@ -76,8 +76,8 @@ DEF_GOLPE_REFERENCIA_PCT     = 80.0   # %
 # dos, el cruce es parejo en todo el tramo (de punta a punta).
 DEF_PUNTO_A_CRUCE            = 0.50
 DEF_PUNTO_B_CRUCE            = 0.0
-DEF_TIEMPO_MEZCLA            = 12     # s
-DEF_FADE_MINIMO_SEG          = 8     # s (70% de DEF_TIEMPO_MEZCLA, ver _cambiar_tiempo_mezcla)
+DEF_TIEMPO_MEZCLA            = 18     # s
+DEF_FADE_MINIMO_SEG          = 13     # s (70% de DEF_TIEMPO_MEZCLA, ver _cambiar_tiempo_mezcla)
 # Techo fijo de la regla de tiempo en el gráfico de Cruce (el slider
 # verde va de 0 a esto). No es un parámetro del motor, solo de la UI.
 TIEMPO_MAXIMO_GRAFICO_CRUCE  = 20.0    # s
@@ -104,7 +104,7 @@ DEF_ORDEN_CONSIDERA_ENERGIA  = False
 DEF_RECORTAR_SILENCIO_FINAL  = True
 
 # --- 🔀 Orden y carga ---
-DEF_ORDENAR_POR_TONO         = True
+DEF_ORDENAR_POR_TONO         = False
 DEF_MODO_CARGA_DUPLICADOS    = "sin_duplicados"
 
 # --- 🥁 Golpe seco ---
