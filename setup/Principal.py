@@ -5547,6 +5547,11 @@ class SmartDJPlayer(QMainWindow):
         self.btn_config.setToolTip(tr("ppal_tooltip_btn_config"))
         self.btn_config.clicked.connect(self.abrir_configuracion_teclas)
         cfg_layout.addWidget(self.btn_config)
+        self.btn_reposicionar = QPushButton("↖")
+        self.btn_reposicionar.setFixedWidth(36)
+        self.btn_reposicionar.setToolTip(tr("ppal_tooltip_btn_reposicionar"))
+        self.btn_reposicionar.clicked.connect(self.reposicionar_esquina_superior_izquierda)
+        cfg_layout.addWidget(self.btn_reposicionar)
         main_layout.addLayout(cfg_layout)
         self.info_panel = QFrame()
         self.lbl_status = QLabel(f"{tr('ppal_estado_prefijo')}: {tr('ppal_estado_inicial')}")
@@ -6144,6 +6149,24 @@ class SmartDJPlayer(QMainWindow):
         wf.mix_start_seconds = nuevo_borde_izq
         self.fraccion_enganche = (nuevo_borde_izq / wf.duration) if wf.duration > 0 else None
         wf.update()
+
+    def reposicionar_esquina_superior_izquierda(self):
+        """Lleva la ventana a la esquina superior izquierda del área libre de la
+        pantalla donde está (sin la barra de tareas), esté donde esté. Si la
+        lista está pegada a la ventana, acompaña el movimiento (ver moveEvent)."""
+        try:
+            if self.isMinimized() or self.isFullScreen():
+                self.showNormal()
+            if self._ancho_maximizado and not self._aplicando_maximizado_ancho:
+                self._restaurar_ancho_normal()
+            pantalla = self.screen() or QApplication.primaryScreen()
+            area = pantalla.availableGeometry()
+            margen = 8
+            self.move(area.left() + margen, area.top() + margen)
+            _aplicar_esquinas_redondeadas(self)
+            self._refrescar_bordes_ventanas()
+        except Exception as e:
+            print(f"No se pudo reposicionar la ventana: {e}")
 
     def abrir_consola(self):
         existente = getattr(self, "_dialogo_consola", None)
