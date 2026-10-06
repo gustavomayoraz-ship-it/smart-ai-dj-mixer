@@ -4536,9 +4536,27 @@ class SeamlessMixerEngine(QObject):
                         self._preparado_b = None
 
                 if not usa_precomputado:
+                    t_espera_prep = time.monotonic()
                     with self._prep_en_curso_lock:
-                        preparado = self._preparar_mezcla_b(
-                            next_file_path, fade_duration, offset_forzado_esperado)
+                        # Si había una precarga de B en curso (un tema largo tarda), acá se
+                        # esperó a que terminara: antes se la tiraba y se volvía a preparar
+                        # B de cero (el doble de espera, y A seguía sonando hasta pasarse).
+                        with self._lock_preparado_b:
+                            p2 = self._preparado_b
+                            if (p2 is not None
+                                    and p2.get("ruta") == next_file_path
+                                    and abs(p2.get("fade_duration", -1.0) - float(fade_duration)) < 0.01
+                                    and p2.get("offset_forzado") == offset_forzado_esperado):
+                                preparado = p2
+                                self._preparado_b = None
+                                usa_precomputado = True
+                        if not usa_precomputado:
+                            preparado = self._preparar_mezcla_b(
+                                next_file_path, fade_duration, offset_forzado_esperado)
+                    _log_debug_tempo(
+                        f"MEZCLA: B preparado en el momento de mezclar ({time.monotonic() - t_espera_prep:.1f} s"
+                        f"{', reutilizó la precarga' if usa_precomputado else ''}) "
+                        f"para '{os.path.basename(next_file_path)}'")
 
                 sound_next = preparado["sound_next"]
                 beat_times_b = list(preparado["beat_times_b"])
@@ -4722,6 +4740,12 @@ class SeamlessMixerEngine(QObject):
                 self.status_update.emit("✅ Mezcla completada (velocidad original de cada tema)")
                 self._programar_restauracion_tempo()
             except Exception as e:
+                try:
+                    import traceback as _tb
+                    _log_debug_tempo("MEZCLA: ERROR durante la mezcla -> "
+                                     + _tb.format_exc().replace("\n", " | "))
+                except Exception:
+                    pass
                 self.status_update.emit(f"Error durante la mezcla: {str(e)}")
                 self.is_mixing = False
                 self._audio_b_en_mezcla = None
@@ -4738,7 +4762,8 @@ class SeamlessMixerEngine(QObject):
                     except Exception:
                         pass
 
-        threading.Thread(target=_mix_process, daemon=True).start()
+        self._hilo_mezcla = threading.Thread(target=_mix_process, daemon=True)
+        self._hilo_mezcla.start()
 class _PuenteAnalisisDJ(QObject):
     pista_actualizada = Signal(object)
 
@@ -6312,6 +6337,7 @@ class SmartDJPlayer(QMainWindow):
         if self.is_playing:
             pos_a, pos_b = self.engine.get_positions()
             self.waveform_current.set_progress(pos_a)
+            self._vigilar_fin_de_tema(pos_a)
             try:
                 # El seguidor de envolvente de nivel_golpe_seco_en_vivo ya
                 # tiene memoria propia (rápida/lenta) así que no hace
@@ -6491,6 +6517,42 @@ class SmartDJPlayer(QMainWindow):
         frases = np.asarray(wf.phrase_boundaries, dtype=float)
         return bool(np.any((frases >= borde_izq) & (frases <= borde_izq + ancho)))
 
+    def _vigilar_fin_de_tema(self, pos_a):
+        """Red de seguridad: si una mezcla se disparó pero nunca arrancó (falló o se
+        colgó) y el tema ya terminó de sonar, no se puede quedar "sonando" para siempre
+        con la línea blanca en el final y el contador de Pos sumando sin parar.
+        Se pasa al tema siguiente como cuando no hay mezcla."""
+        try:
+            if (not self._mezcla_disparada or self.engine.is_mixing
+                    or self.engine._chan_a_en_swap_momentaneo):
+                self._t_fin_sin_mezcla = None
+                return
+            duracion = self.waveform_current.duration
+            if duracion <= 0 or pos_a < duracion - 1.0 or self.engine.chan_a.get_busy():
+                self._t_fin_sin_mezcla = None
+                return
+            hilo = getattr(self.engine, "_hilo_mezcla", None)
+            if hilo is not None and hilo.is_alive():
+                return          # B todavía se está preparando: esa mezcla arranca sola
+            ahora = time.monotonic()
+            if getattr(self, "_t_fin_sin_mezcla", None) is None:
+                self._t_fin_sin_mezcla = ahora
+                return
+            if ahora - self._t_fin_sin_mezcla < 2.0:
+                return
+            self._t_fin_sin_mezcla = None
+            _log_debug_tempo(
+                f"MEZCLA: el tema terminó (pos={pos_a:.1f}s de {duracion:.1f}s) y la mezcla "
+                "nunca arrancó -> se pasa al siguiente sin mezcla")
+            self.update_status("La mezcla no llegó a arrancar: se pasa al tema siguiente.")
+            self._rectangulo_en_vivo = False
+            self._rectangulo_fijo_por_frase = False
+            self._mezcla_ya_estuvo_activa = False
+            self.progress_bar.setRange(0, 100)
+            self._avanzar_sin_mezcla()
+        except Exception as e:
+            print(f"[dj_player] vigilancia de fin de tema: {e}")
+
     def _chequear_enganche_automatico(self, pos_a):
         if self.engine.is_mixing:
             return
@@ -6551,6 +6613,14 @@ class SmartDJPlayer(QMainWindow):
         if not (0 <= self.next_index < len(self.playlist)):
             return
         self._mezcla_pendiente_objetivo = "siguiente"
+        try:
+            _log_debug_tempo(
+                f"MEZCLA: disparada en pos={self.engine.get_positions()[0]:.1f}s de "
+                f"{self.waveform_current.duration:.1f}s (recuadro en "
+                f"{self._borde_izq_recuadro_actual():.1f}s) -> siguiente "
+                f"'{os.path.basename(self.playlist[self.next_index].ruta)}'")
+        except Exception:
+            pass
         self.progress_bar.setRange(0, 0)
         self._rectangulo_en_vivo = True
         self._mezcla_ya_estuvo_activa = False
