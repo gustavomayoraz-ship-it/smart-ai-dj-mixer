@@ -6162,7 +6162,7 @@ class SmartDJPlayer(QMainWindow):
             pantalla = self.screen() or QApplication.primaryScreen()
             area = pantalla.availableGeometry()
             margen = 8
-            self.move(area.left() + margen, area.top() + margen)
+            self.move(area.left() + margen, area.top())   # pegada arriba (sin hueco)
             _aplicar_esquinas_redondeadas(self)
             self._refrescar_bordes_ventanas()
         except Exception as e:
@@ -6899,7 +6899,7 @@ class SmartDJPlayer(QMainWindow):
                     area.width() - margen_maximizado * 2 - reserva_izq - reserva_der)
                 self.setGeometry(
                     x_nuevo,
-                    area.y() + margen_superior + margen_maximizado,
+                    area.y() + margen_superior,       # pegada arriba (sin hueco)
                     ancho_disponible,
                     self._alto_ventana_fijo)
                 self._ancho_maximizado = True
