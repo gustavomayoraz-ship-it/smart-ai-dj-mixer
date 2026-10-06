@@ -770,6 +770,66 @@ def _intentar_instalar(nombre: str):
     return None, "\n\n".join(partes)
 
 
+def _faltan_en_offline():
+    """Paquetes de DEPENDENCIAS que todavía no tienen su archivo en dependencias_offline."""
+    try:
+        archivos = [a.lower().replace("-", "_") for a in os.listdir(CARPETA_DEPENDENCIAS_OFFLINE)
+                    if a.lower().endswith((".whl", ".tar.gz", ".zip"))]
+    except OSError:
+        archivos = []
+    faltan = []
+    for nombre, _modulo in DEPENDENCIAS:
+        base = nombre.lower().replace("-", "_")
+        if not any(a.startswith(base + "_") or a.startswith(base + "-") for a in archivos):
+            faltan.append(nombre)
+    return faltan
+
+
+def guardar_copia_offline():
+    """Baja a dependencias_offline los archivos de TODAS las dependencias (y de lo que a su
+    vez necesitan), para poder reinstalar sin internet. Devuelve (ok, detalle).
+    Si ya están todos no hace nada; si falló hace poco (sin internet) no insiste en
+    cada inicio."""
+    if not _faltan_en_offline():
+        return True, None
+    marca = CARPETA_DEPENDENCIAS_OFFLINE / ".ultimo_intento_fallido"
+    try:
+        if time.time() - marca.stat().st_mtime < 24 * 3600:
+            return True, None
+    except OSError:
+        pass
+    try:
+        CARPETA_DEPENDENCIAS_OFFLINE.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "download", "--retries", "1", "--timeout", "20",
+             "-d", str(CARPETA_DEPENDENCIAS_OFFLINE)] + [n for n, _ in DEPENDENCIAS],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            creationflags=CREATIONFLAGS)
+        ok = r.returncode == 0
+        detalle = None if ok else (r.stderr or r.stdout or "pip download no devolvió detalle.").strip()
+    except Exception as e:
+        ok, detalle = False, str(e)
+    try:
+        if ok:
+            if marca.exists():
+                marca.unlink()
+        else:
+            marca.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+    except OSError:
+        pass
+    return ok, detalle
+
+
+def _anotar_error_copia_offline(detalle):
+    try:
+        CARPETA_LOGS.mkdir(parents=True, exist_ok=True)
+        with open(CARPETA_LOGS / "instalador_error.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n--- copia offline ---\n"
+                    + str(detalle) + "\n\n")
+    except Exception:
+        pass
+
+
 class VentanaVerificacion(tk.Tk):
     def __init__(self, config_data: dict):
         super().__init__()
@@ -907,6 +967,14 @@ class VentanaVerificacion(tk.Tk):
                 fg="#e74c3c"))
             self._programar(0, self._mostrar_boton_reintentar)
         else:
+            if _faltan_en_offline():
+                # Guarda una copia de los paquetes en dependencias_offline para poder
+                # reinstalar sin internet (la primera vez tarda unos minutos).
+                self._programar(0, self._modo_copia_offline)
+                ok_copia, detalle_copia = guardar_copia_offline()
+                if not ok_copia:
+                    _anotar_error_copia_offline(detalle_copia)
+                self._programar(0, self._fin_copia_offline)
             self._programar(0, lambda: self._config_seguro(
                 self.lbl_estado_general, text="✅ Todo listo, iniciando...", fg="#2c3e50"))
             # Sin botón que confirmar: apenas termina la verificación (todo
@@ -915,6 +983,24 @@ class VentanaVerificacion(tk.Tk):
             # sigue directo a la aplicación. El breve delay es solo para que
             # se alcance a leer el "Todo listo" antes de que se cierre.
             self._programar(500, self._finalizar_y_continuar)
+
+    def _modo_copia_offline(self):
+        self._config_seguro(
+            self.lbl_estado_general, fg="#2c3e50",
+            text="⬇️ Guardando una copia en dependencias_offline para poder instalar "
+                 "sin internet (la primera vez tarda unos minutos)...")
+        try:
+            self.progreso.config(mode="indeterminate")
+            self.progreso.start(12)
+        except Exception:
+            pass
+
+    def _fin_copia_offline(self):
+        try:
+            self.progreso.stop()
+            self.progreso.config(mode="determinate", value=100)
+        except Exception:
+            pass
 
     def _mostrar_boton_reintentar(self):
         if self.btn_reintentar.winfo_exists():
