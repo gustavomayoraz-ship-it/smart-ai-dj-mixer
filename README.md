@@ -6,15 +6,17 @@ VB-Cable ni ningún driver de cable virtual.
 
 ```
 deck A ─┐
-        ├─► bus interno ─► Ecualizador DJ ─► sounddevice ─► parlantes
-deck B ─┘
+        ├─► servidor de audio ─► Ecualizador DJ ─► sounddevice ─► parlantes
+deck B ─┘      (proceso aparte)
 ```
 
 ## Qué cambió respecto de los dos programas originales
 
-- `setup/bus_audio.py` (nuevo): reemplaza al mezclador de pygame. Mezcla los decks A/B, los pasa por el
-  ecualizador y los saca con `sounddevice`. Los "canales" imitan la interfaz de `pygame.mixer.Channel`
-  (`play`, `stop`, `set_volume`, `get_volume`, `get_busy`), así el motor de mezcla casi no cambió.
+- `setup/bus_audio.py` (nuevo): reemplaza al mezclador de pygame. Es el lado "cliente": los "canales" imitan
+  la interfaz de `pygame.mixer.Channel` (`play`, `stop`, `set_volume`, `get_volume`, `get_busy`), así el motor
+  de mezcla casi no cambió, pero el sonido se arma en un proceso aparte (ver más abajo).
+- `setup/servidor_audio.py` y `setup/bus_nucleo.py` (nuevos): el servidor de audio. Mezcla los decks A/B, los
+  pasa por el ecualizador y los saca con `sounddevice`.
 - `setup/ecualizador.py` (nuevo): el motor de efectos y la ventana del Ecualizador DJ, sin instalador de
   librerías, sin VB-Cable y sin captura de audio.
 - `setup/Principal.py`: usa el bus en vez de pygame y suma el botón 🎛 (junto al ⚙) que abre el ecualizador.
@@ -41,6 +43,17 @@ El ecualizador guarda su configuración en `config/ecualizador_dj_config.json`.
 El bus agrega un colchón de unos 60 ms (se agranda solo si la PC se atrasa; se ve en la línea de diagnóstico
 de abajo de la ventana del ecualizador: `colchón`, `vac`). Las barritas y ondas ya compensan ese retraso.
 
+## Audio en un proceso aparte (sin cortes ni "descargas")
+
+Todo el trabajo de sonido (mezcla, ecualizador y salida) corre en su **propio proceso**
+(`setup/servidor_audio.py`), de prioridad algo mayor. Los temas se pasan por memoria compartida (sin copias
+extra), los volúmenes y pausas también, y las órdenes (play/stop/EQ) por una tubería. Así lo que haga el
+programa (cargar listas, analizar, preparar la mezcla, dibujar) **no puede** cortar el audio: antes esas
+tareas se peleaban el intérprete de Python (GIL) con el hilo que arma el sonido. La ventana del ecualizador
+vive en el servidor. Si el servidor se cae, se reinicia solo; si falla varias veces seguidas, el programa usa
+el mismo motor dentro de sí (`setup/bus_nucleo.py`), como antes. Si el programa se cierra mal, el servidor se
+cierra solo.
+
 ## Análisis de la lista sin cortes de audio
 
 El análisis de los temas (BPM, tono, energía) corre en **procesos separados** de baja prioridad
@@ -55,7 +68,9 @@ se cuelga, se descarta y se reintenta; si el programa principal se cierra mal, l
 dj_player_Mixer.py        # Punto de entrada y verificación de dependencias
 setup/
   Principal.py            # Ventana principal y motor de mezcla
-  bus_audio.py            # Bus de audio interno (reemplaza a pygame)
+  bus_audio.py            # Cliente del audio (reemplaza a pygame)
+  servidor_audio.py       # Proceso de audio: mezcla + ecualizador + salida
+  bus_nucleo.py           # Núcleo del bus (mezcla, anillo, salida)
   analisis_proceso.py     # Análisis de la lista en procesos separados
   ecualizador.py          # Ecualizador DJ integrado (motor + ventana)
   ajustes.py, Lista.py, idiomas.py

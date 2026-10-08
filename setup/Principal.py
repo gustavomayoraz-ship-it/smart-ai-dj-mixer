@@ -67,7 +67,6 @@ from dj_player_Mixer import (
 )
 from setup.idiomas import tr
 from setup import bus_audio
-from setup import ecualizador
 from setup.analisis_proceso import (
     detectar_downbeat, detectar_tono, _corregir_media_o_doble_tempo,
     _PERFIL_MAYOR, _PERFIL_MENOR, _NOMBRES_NOTA, _CAMELOT_MAYOR, _CAMELOT_MENOR,
@@ -6131,25 +6130,9 @@ class SmartDJPlayer(QMainWindow):
         dialogo.raise_()
 
     def abrir_ecualizador(self):
-        """Abre la ventana del Ecualizador DJ integrado; si ya está a la vista, la oculta."""
+        """Muestra el Ecualizador DJ (vive en el servidor de audio); si ya está a la vista, lo oculta."""
         try:
-            ventana = getattr(self, "_ventana_ecualizador", None)
-            if ventana is not None and ventana.isVisible() and not ventana.isMinimized():
-                ventana.hide()
-                return
-            if ventana is None:
-                ventana = ecualizador.crear_ventana(
-                    bus_audio.obtener_bus(), ecualizador.config_actual(),
-                    QApplication.instance(), self)
-                self._ventana_ecualizador = ventana
-                ventana.mostrar_primera_vez()
-            else:
-                if ventana.isMinimized():
-                    ventana.showNormal()
-                else:
-                    ventana.show()
-            ventana.raise_()
-            ventana.activateWindow()
+            bus_audio.obtener_bus().alternar_ecualizador(self)
         except Exception as e:
             print(f"[ecualizador] No se pudo abrir la ventana: {e}")
             try:
@@ -8036,8 +8019,7 @@ class SmartDJPlayer(QMainWindow):
             self.lista_separada = None
         self.analizador_fondo.detener()
         try:
-            ecualizador.guardar_config_actual(bus_audio.obtener_bus())
-            bus_audio.obtener_bus().detener()
+            bus_audio.obtener_bus().detener()      # el servidor guarda la config del ecualizador
         except Exception:
             pass
         super().closeEvent(event)
@@ -8827,17 +8809,13 @@ def lanzar_app(config_data: dict) -> None:
                      name="precalentar-analisis").start()
     _init_dependencias_opcionales()
 
-    # Bus de audio interno (reemplaza al mezclador de pygame) con el Ecualizador DJ
-    # integrado: ya no hace falta ningún cable virtual.
+    # Motor de audio (mezcla + Ecualizador DJ + salida) en un proceso aparte: así nada de lo
+    # que haga el programa puede cortar el sonido. Arranca en paralelo mientras se arma la ventana.
     bus = bus_audio.obtener_bus()
     try:
-        ecualizador.preparar(bus)
+        bus.iniciar()
     except Exception as e:
-        print(f"[audio] No se pudo preparar el ecualizador (se sigue sin ecualizar): {e}")
-    try:
-        bus.iniciar(ecualizador.config_actual().get("dispositivo_salida", ""))
-    except Exception as e:
-        print(f"[audio] No se pudo abrir la salida de audio: {e}")
+        print(f"[audio] No se pudo iniciar el audio: {e}")
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -8863,6 +8841,10 @@ def lanzar_app(config_data: dict) -> None:
     sys.excepthook = _manejar_excepcion_no_capturada
 
     player.show()
+    try:
+        bus.fijar_ventana_principal(int(player.winId()))
+    except Exception:
+        pass
     sys.exit(app.exec())
 
 

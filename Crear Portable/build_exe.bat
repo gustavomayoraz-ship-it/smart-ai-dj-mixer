@@ -51,6 +51,8 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --hidden-import audiotsm ^
   --hidden-import setup.ecualizador ^
   --hidden-import setup.bus_audio ^
+  --hidden-import setup.bus_nucleo ^
+  --hidden-import setup.servidor_audio ^
   --hidden-import setup.analisis_proceso ^
   "..\dj_player_Mixer.py"
 
