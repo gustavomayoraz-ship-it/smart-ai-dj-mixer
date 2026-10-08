@@ -248,7 +248,7 @@ personal de Gustavo.
 
 LIBRERÍAS
 ---------
-PySide6, pygame, librosa, numpy, soundfile, scipy, y módulos estándar de Python.
+PySide6, pedalboard, sounddevice, librosa, numpy, soundfile, scipy, y módulos estándar de Python.
 """
 
 

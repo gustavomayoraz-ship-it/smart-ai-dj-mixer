@@ -1,64 +1,71 @@
-# Smart AI DJ Mixer
+# Fusion Play_Mix
 
-Reproductor/mezclador de DJ automático para escritorio (Windows), escrito en Python con
-PySide6. Analiza los temas (BPM, tonalidad, energía) y arma transiciones (crossfades)
-automáticas entre pistas, con una skin totalmente personalizable.
+Reproductor/mezclador de DJ automático (Smart AI DJ Mixer) con el **Ecualizador DJ integrado**.
+El sonido de los dos decks pasa por el ecualizador **dentro del mismo programa**: ya no hace falta
+VB-Cable ni ningún driver de cable virtual.
 
-## Características principales
-
-- Mezcla automática entre temas con crossfade adaptativo según BPM/tonalidad.
-- Detección de brillo/agudos y "golpe seco" para ajustar cada transición.
-- Editor de skins integrado: colores de la interfaz, de la lista de temas y de los
-  sliders, todos configurables y guardables como skins propias.
-- Atajos de teclado configurables (mezclar tema anterior/siguiente, etc.).
-- Lista de reproducción acoplable a cualquier lado de la ventana principal.
-
-## Requisitos
-
-- Python 3.11+ (probado con 3.13)
-- Windows (usa rutas y utilidades específicas de Windows; el resto del stack es
-  multiplataforma)
-
-## Instalación
-
-```bash
-pip install -r requirements.txt
 ```
+deck A ─┐
+        ├─► bus interno ─► Ecualizador DJ ─► sounddevice ─► parlantes
+deck B ─┘
+```
+
+## Qué cambió respecto de los dos programas originales
+
+- `setup/bus_audio.py` (nuevo): reemplaza al mezclador de pygame. Mezcla los decks A/B, los pasa por el
+  ecualizador y los saca con `sounddevice`. Los "canales" imitan la interfaz de `pygame.mixer.Channel`
+  (`play`, `stop`, `set_volume`, `get_volume`, `get_busy`), así el motor de mezcla casi no cambió.
+- `setup/ecualizador.py` (nuevo): el motor de efectos y la ventana del Ecualizador DJ, sin instalador de
+  librerías, sin VB-Cable y sin captura de audio.
+- `setup/Principal.py`: usa el bus en vez de pygame y suma el botón 🎛 (junto al ⚙) que abre el ecualizador.
+- Ya no se usa `pygame`; se agrega `pedalboard`.
 
 ## Uso
 
 ```bash
+pip install -r requirements.txt
 python dj_player_Mixer.py
 ```
 
-En el primer arranque el programa crea solo sus carpetas de datos (`config/`, `cache/`,
-`logs/`, `estilos/`) con los valores de fábrica.
+Las librerías que falten se instalan solas en el primer arranque. Para usar el ecualizador, tocá el botón 🎛:
 
-## Generar el ejecutable (.exe)
+- **Activar / Desactivar ecualizador**: prende o apaga el procesamiento (apagado, el sonido sale tal cual).
+- **Bypass**: compara con y sin efecto manteniendo el volumen.
+- Pestaña **Avanzado**: elegí el parlante de salida y tocá *Aplicar salida*. Por defecto usa la salida
+  predeterminada de Windows (WASAPI).
 
-El script `Crear Portable/build_exe.bat` empaqueta todo con PyInstaller en un `.exe`
-standalone (no requiere Python instalado en la PC de destino). Pide permisos de
-administrador al ejecutarse:
+El ecualizador guarda su configuración en `config/ecualizador_dj_config.json`.
 
-```bash
-cd "Crear Portable"
-build_exe.bat
+## Latencia
+
+El bus agrega un colchón de unos 60 ms (se agranda solo si la PC se atrasa; se ve en la línea de diagnóstico
+de abajo de la ventana del ecualizador: `colchón`, `vac`). Las barritas y ondas ya compensan ese retraso.
+
+## Análisis de la lista sin cortes de audio
+
+El análisis de los temas (BPM, tono, energía) corre en **procesos separados** de baja prioridad
+(`setup/analisis_proceso.py`), no en hilos del programa. Así no le quita tiempo al audio y se puede
+reproducir, mezclar y cargar listas enormes al mismo tiempo. En Windows con 4 o más núcleos, esos procesos
+no usan los dos últimos núcleos, que quedan para el audio y la interfaz. Si un proceso de análisis se cae o
+se cuelga, se descarta y se reintenta; si el programa principal se cierra mal, los procesos se cierran solos.
+
+## Estructura
+
 ```
-
-El resultado queda en `Crear Portable/SmartDJMixer/`.
-
-## Estructura del proyecto
-
-```
-dj_player_Mixer.py       # Punto de entrada, motor de audio (pygame) y skins
+dj_player_Mixer.py        # Punto de entrada y verificación de dependencias
 setup/
-  Principal.py            # Ventana principal del reproductor
-  ajustes.py               # Ventana de Ajustes (mezcla, skins, atajos)
-  Lista.py                 # Widget de la lista de temas
-Crear Portable/
-  build_exe.bat           # Genera el ejecutable con PyInstaller (dentro de esta carpeta)
+  Principal.py            # Ventana principal y motor de mezcla
+  bus_audio.py            # Bus de audio interno (reemplaza a pygame)
+  analisis_proceso.py     # Análisis de la lista en procesos separados
+  ecualizador.py          # Ecualizador DJ integrado (motor + ventana)
+  ajustes.py, Lista.py, idiomas.py
+config/
+  dependencias_dj.py      # Lista de librerías
+  ecualizador_dj_config.json
+estilos/                  # Skins
+Crear Portable/build_exe.bat
 ```
 
 ## Licencia
 
-Este proyecto está bajo licencia MIT (ver [LICENSE](LICENSE)).
+MIT (ver [LICENSE](LICENSE)).

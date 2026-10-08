@@ -19,6 +19,9 @@ import time
 import itertools
 import collections
 import queue
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeout
+from concurrent.futures.process import BrokenProcessPool
 import hashlib
 import gc
 import uuid
@@ -63,6 +66,13 @@ from dj_player_Mixer import (
     _cargar_estilos_disponibles,
 )
 from setup.idiomas import tr
+from setup import bus_audio
+from setup import ecualizador
+from setup.analisis_proceso import (
+    detectar_downbeat, detectar_tono, _corregir_media_o_doble_tempo,
+    _PERFIL_MAYOR, _PERFIL_MENOR, _NOMBRES_NOTA, _CAMELOT_MAYOR, _CAMELOT_MENOR,
+    ANALISIS_LISTA_SR, ANALISIS_LISTA_SEG_FRAGMENTO, analizar_archivo, iniciar_trabajador,
+)
 
 from setup.Lista import (
     VentanaListaSeparada,
@@ -647,7 +657,7 @@ BANDA_DETECCION_BOMBO_HZ = (60.0, 120.0)
 # Se le resta a la posición real para que la barrita mida el audio que
 # está saliendo AHORA por el parlante, no el que saldrá dentro de un rato.
 # 100 ms es un valor típico para pygame en Windows con WASAPI compartido.
-LATENCIA_COMPENSACION_SEG = 0.100
+LATENCIA_COMPENSACION_SEG = 0.100 + bus_audio.LATENCIA_EXTRA_SEG
 # Duración de la ventana de medición de la barrita. Más larga = más
 # estable, menos sensible a picos instantáneos. 60 ms cubre bien un
 # golpe de bombo típico (50-100 ms de cuerpo).
@@ -988,43 +998,6 @@ def _analizar_visual_de_archivo(file_path, sr=44100, y_mono_precargado=None):
     return resultado
 
 
-def detectar_downbeat(y_mono, sr, beat_times):
-    beat_times = np.asarray(beat_times, dtype=float)
-    if beat_times.size < 8 or y_mono.size == 0:
-        return 0, beat_times[::4] if beat_times.size > 0 else np.array([])
-    try:
-        nyquist = sr / 2.0
-        corte_kick = float(np.clip(150.0 / nyquist, 0.001, 0.99))
-        sos_kick = scipy.signal.butter(4, corte_kick, btype="low", output="sos")
-        y_kick = scipy.signal.sosfiltfilt(sos_kick, y_mono)
-    except Exception:
-        return 0, beat_times[::4] if beat_times.size > 0 else np.array([])
-    ventana_muestras = max(1, int(0.05 * sr))
-    energia_por_beat = np.zeros(beat_times.size)
-    for i, t in enumerate(beat_times):
-        idx = int(t * sr)
-        ini = max(0, idx - ventana_muestras // 2)
-        fin = min(len(y_kick), idx + ventana_muestras // 2)
-        if fin > ini:
-            segmento = y_kick[ini:fin]
-            energia_por_beat[i] = np.sqrt(np.mean(segmento ** 2))
-    if energia_por_beat.max() <= 1e-9:
-        return 0, beat_times[::4]
-    sumas = []
-    for fase in range(4):
-        indices = np.arange(fase, beat_times.size, 4)
-        if indices.size == 0:
-            sumas.append(0.0)
-            continue
-        sumas.append(float(energia_por_beat[indices].sum()))
-    mejor_fase = int(np.argmax(sumas))
-    if sumas[0] > 0 and sumas[mejor_fase] > 0:
-        if (sumas[mejor_fase] - sumas[0]) / sumas[mejor_fase] < 0.01:
-            mejor_fase = 0
-    downbeat_times = beat_times[mejor_fase::4]
-    return mejor_fase, downbeat_times
-
-
 BEATS_POR_FRASE = 32
 
 
@@ -1119,47 +1092,6 @@ class PistaDJ:
         return Path(self.ruta).stem
 
 
-_PERFIL_MAYOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
-_PERFIL_MENOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
-_NOMBRES_NOTA = ["Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"]
-
-_CAMELOT_MAYOR = {
-    0: "8B", 1: "3B", 2: "10B", 3: "5B", 4: "12B", 5: "7B",
-    6: "2B", 7: "9B", 8: "4B", 9: "11B", 10: "6B", 11: "1B",
-}
-_CAMELOT_MENOR = {
-    0: "5A", 1: "12A", 2: "7A", 3: "2A", 4: "9A", 5: "4A",
-    6: "11A", 7: "6A", 8: "1A", 9: "8A", 10: "3A", 11: "10A",
-}
-
-
-def detectar_tono(y, sr, hop_length=2048) -> dict:
-    if y.size == 0:
-        return {"tono": None, "tono_nombre": None}
-    # El tono sale del PROMEDIO del chroma a lo largo de todo el tema, así
-    # que no hace falta una resolución temporal fina: con hop_length=2048
-    # (en vez del 512 por defecto de librosa) hay 4 veces menos cuadros
-    # para calcular y el promedio da prácticamente lo mismo -- es la parte
-    # más pesada del análisis de la lista.
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    perfil_tema = chroma.mean(axis=1)
-    if perfil_tema.std() < 1e-9:
-        return {"tono": None, "tono_nombre": None}
-    mejor_score = None
-    mejor_tonica = 0
-    mejor_modo = "mayor"
-    for tonica in range(12):
-        score_mayor = np.corrcoef(perfil_tema, np.roll(_PERFIL_MAYOR, tonica))[0, 1]
-        score_menor = np.corrcoef(perfil_tema, np.roll(_PERFIL_MENOR, tonica))[0, 1]
-        if mejor_score is None or score_mayor > mejor_score:
-            mejor_score, mejor_tonica, mejor_modo = score_mayor, tonica, "mayor"
-        if score_menor > mejor_score:
-            mejor_score, mejor_tonica, mejor_modo = score_menor, tonica, "menor"
-    if mejor_modo == "mayor":
-        return {"tono": _CAMELOT_MAYOR[mejor_tonica], "tono_nombre": f"{_NOMBRES_NOTA[mejor_tonica]} mayor"}
-    return {"tono": _CAMELOT_MENOR[mejor_tonica], "tono_nombre": f"{_NOMBRES_NOTA[mejor_tonica]} menor"}
-
-
 def _distancia_circular_camelot(a: int, b: int) -> int:
     d = abs(a - b) % 12
     return min(d, 12 - d)
@@ -1196,16 +1128,6 @@ def distancia_camelot(codigo_a, codigo_b) -> float:
         return 0.15
     distancia_rueda = _distancia_circular_camelot(num_a, num_b)
     return min(1.0, 0.3 + 0.1 * distancia_rueda)
-
-
-def _corregir_media_o_doble_tempo(bpm: float) -> float:
-    if bpm <= 0:
-        return bpm
-    while bpm < 90 and bpm * 2 <= 180:
-        bpm *= 2
-    while bpm > 180 and bpm / 2 >= 90:
-        bpm /= 2
-    return bpm
 
 
 TOLERANCIA_BPM_SYNC = 1.5
@@ -2009,8 +1931,6 @@ def _limpiar_hum_y_dc_stereo(y_stereo, sr):
 # fragmento del medio del tema y a menor frecuencia de muestreo -- es solo
 # metadata, no afecta la calidad del audio que suena. Ver
 # AnalizadorDeFondoDJ._procesar.
-ANALISIS_LISTA_SR = 22050
-ANALISIS_LISTA_SEG_FRAGMENTO = 90.0
 
 
 class AnalizadorDeFondoDJ:
@@ -2024,6 +1944,8 @@ class AnalizadorDeFondoDJ:
         # en la cola) -- ver hay_contencion().
         self._hilos_ocupados = 0
         self._lock_contador_ocupados = threading.Lock()
+        self._pool = None
+        self._lock_pool = threading.Lock()
         self._permiso_continuar = threading.Event()
         self._permiso_continuar.set()
         recursos = _detectar_recursos_pc()
@@ -2094,6 +2016,59 @@ class AnalizadorDeFondoDJ:
             return False
         return self._hilos_ocupados > 0 or not self._cola.empty()
 
+    # ------------------------------------------------------------------
+    # Análisis en procesos separados (no compite con el audio por el GIL)
+    # ------------------------------------------------------------------
+    TIMEOUT_ANALISIS_SEG = 300
+
+    def _obtener_pool(self):
+        with self._lock_pool:
+            if self._pool is None:
+                self._pool = ProcessPoolExecutor(
+                    max_workers=max(1, self.num_hilos),
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=iniciar_trabajador, initargs=(os.getpid(),))
+            return self._pool
+
+    def _matar_pool(self, pool) -> None:
+        with self._lock_pool:
+            if self._pool is pool:
+                self._pool = None
+        try:
+            for proc in list(getattr(pool, "_processes", {}).values()):
+                proc.terminate()
+        except Exception:
+            pass
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    def _analizar_en_proceso(self, ruta_abs: str) -> dict:
+        """Manda el análisis a un proceso hijo. Si el proceso se cae o se cuelga, se descarta el
+        grupo y se reintenta; como último recurso (por ejemplo si el sistema no deja crear
+        procesos) se analiza en este mismo proceso para no dejar el tema sin analizar."""
+        for _ in range(3):
+            if not self._activo:
+                raise RuntimeError("análisis cancelado")
+            pool = self._obtener_pool()
+            try:
+                futuro = pool.submit(analizar_archivo, ruta_abs)
+            except Exception:                      # grupo cerrado por otro hilo: reintentar
+                self._matar_pool(pool)
+                continue
+            try:
+                return futuro.result(timeout=self.TIMEOUT_ANALISIS_SEG)
+            except BrokenProcessPool:
+                self._matar_pool(pool)
+            except FuturesTimeout:
+                self._matar_pool(pool)
+                raise RuntimeError("el análisis tardó demasiado")
+        if not self._activo:
+            raise RuntimeError("análisis cancelado")
+        print("[dj_player] No se pudo usar un proceso aparte para analizar; se analiza en el principal.")
+        return analizar_archivo(ruta_abs)
+
     def _procesar(self) -> None:
         while self._activo:
             if not self._permiso_continuar.is_set():
@@ -2135,49 +2110,13 @@ class AnalizadorDeFondoDJ:
                     pista.fase_downbeat = entrada.get("fase_downbeat")
                     pista.energia = entrada.get("energia")
                 else:
-                    # Este análisis es SOLO metadata de la lista (BPM, tono,
-                    # energía para ordenar/mostrar) -- no toca el audio que
-                    # suena (eso lo decodifica aparte, a calidad completa,
-                    # la preparación del deck). Por eso alcanza con un
-                    # fragmento del medio del tema a 22.05 kHz en vez del
-                    # tema entero a 44.1 kHz: beat_track y sobre todo
-                    # chroma_cqt (lo más pesado) bajan varias veces el
-                    # tiempo, y el BPM/tono se detectan igual de bien con
-                    # ~90 s de música. (fase_downbeat queda relativa al
-                    # fragmento; ninguna otra parte la usa por pista.)
-                    _t0 = time.monotonic()
-                    offset_frag = 0.0
-                    try:
-                        dur_total = float(sf.info(ruta_abs).duration)
-                        if dur_total > ANALISIS_LISTA_SEG_FRAGMENTO * 1.3:
-                            offset_frag = (dur_total - ANALISIS_LISTA_SEG_FRAGMENTO) / 2.0
-                    except Exception:
-                        dur_total = None
-                    y, sr = librosa.load(
-                        ruta_abs, sr=ANALISIS_LISTA_SR, mono=True,
-                        offset=offset_frag, duration=ANALISIS_LISTA_SEG_FRAGMENTO)
-                    _t_load = time.monotonic() - _t0
-                    tempo, _beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-                    bpm = float(tempo[0]) if hasattr(tempo, "__len__") else float(tempo)
-                    bpm = _corregir_media_o_doble_tempo(bpm)
-                    _t_beat = time.monotonic() - _t0 - _t_load
-                    resultado_tono = detectar_tono(y, sr)
-                    _t_tono = time.monotonic() - _t0 - _t_load - _t_beat
-                    if len(_beat_frames) > 0:
-                        beat_times_full = librosa.frames_to_time(_beat_frames, sr=sr)
-                        fase_downbeat, _ = detectar_downbeat(y, sr, beat_times_full)
-                    else:
-                        fase_downbeat = 0
-                    energia = float(np.sqrt(np.mean(np.square(y)))) if y.size else 0.0
-                    print(f"[analisis-lista] '{os.path.basename(ruta_abs)}' "
-                          f"total={time.monotonic() - _t0:.2f}s "
-                          f"(carga={_t_load:.2f}s beat={_t_beat:.2f}s "
-                          f"tono={_t_tono:.2f}s) bpm={bpm:.1f}")
-                    pista.bpm = bpm
-                    pista.energia = energia
-                    pista.tono = resultado_tono["tono"]
-                    pista.tono_nombre = resultado_tono["tono_nombre"]
-                    pista.fase_downbeat = fase_downbeat
+                    res = self._analizar_en_proceso(ruta_abs)
+                    print(f"[analisis-lista] '{os.path.basename(ruta_abs)}' {res['log']}")
+                    pista.bpm = res["bpm"]
+                    pista.energia = res["energia"]
+                    pista.tono = res["tono"]
+                    pista.tono_nombre = res["tono_nombre"]
+                    pista.fase_downbeat = res["fase_downbeat"]
                     with _lock_cache_orden:
                         cache = _cargar_cache_orden()
                         cache[ruta_abs] = {
@@ -2201,6 +2140,10 @@ class AnalizadorDeFondoDJ:
 
     def detener(self) -> None:
         self._activo = False
+        with self._lock_pool:
+            pool = self._pool
+        if pool is not None:
+            self._matar_pool(pool)
 
 
 class WaveformWidget(QWidget):
@@ -3003,10 +2946,6 @@ class _PhaseLockedStream:
             self.stream = None
 
 
-import pygame
-import pygame.sndarray
-
-
 class SeamlessMixerEngine(QObject):
     status_update = Signal(str)
     main_track_analyzed = Signal(np.ndarray, int, float, list, list, object, list, int)
@@ -3021,8 +2960,8 @@ class SeamlessMixerEngine(QObject):
 
     def __init__(self):
         super().__init__()
-        self.chan_a = pygame.mixer.Channel(0)
-        self.chan_b = pygame.mixer.Channel(1)
+        self.chan_a = bus_audio.canal(0)
+        self.chan_b = bus_audio.canal(1)
         self.current_sound_a = None
         self.start_time_a = 0.0
         self.start_time_b = 0.0
@@ -3675,7 +3614,7 @@ class SeamlessMixerEngine(QObject):
             try:
                 self.chan_a.stop()
                 self.chan_b.stop()
-                pygame.mixer.stop()
+                bus_audio.detener_todo()
             except Exception:
                 pass
             time.sleep(0.05)
@@ -3711,7 +3650,7 @@ class SeamlessMixerEngine(QObject):
                 # procesado en la posición guardada -- sin ningún
                 # destello audible mientras tanto.
                 silencio = np.zeros((4410, 2), dtype=np.int16)  # 100 ms
-                self.current_sound_a = pygame.sndarray.make_sound(silencio)
+                self.current_sound_a = bus_audio.make_sound(silencio)
                 self.chan_a.set_volume(0.0)
                 self.chan_a.play(self.current_sound_a)
                 self.start_time_a = time.monotonic()
@@ -3861,12 +3800,12 @@ class SeamlessMixerEngine(QObject):
                 rampa_declick = np.linspace(0.0, 1.0, muestras_declick, dtype=np.float64)
                 audio_export[:muestras_declick] *= rampa_declick[:, None]
             audio_int16 = (audio_export * 32767.0).astype(np.int16)
-            nuevo_sonido = pygame.sndarray.make_sound(np.ascontiguousarray(audio_int16))
+            nuevo_sonido = bus_audio.make_sound(np.ascontiguousarray(audio_int16))
 
             self._chan_a_en_swap_momentaneo = True
             try:
                 self.chan_a.stop()
-                pygame.mixer.stop()
+                bus_audio.detener_todo()
                 # Antes había acá un time.sleep(0.03) entre el stop() y el
                 # play() -- eso metía 30ms de silencio real cada vez que
                 # esta función se llama con el tema sonando (el caso más
@@ -3893,7 +3832,7 @@ class SeamlessMixerEngine(QObject):
                     # misma operación -- así no hay ventana entre el
                     # swap del buffer y la pausa, y no se escucha nada.
                     try:
-                        pygame.mixer.pause()
+                        bus_audio.pausar_todo()
                     except Exception:
                         pass
             finally:
@@ -4292,8 +4231,8 @@ class SeamlessMixerEngine(QObject):
         print(f"[prep]   sf.write WAV ({y_aligned.shape[1]/sr:.1f}s audio): {time.time() - t0:.2f}s")
 
         t0 = time.time()
-        sound_next = pygame.mixer.Sound(out_path)
-        print(f"[prep]   pygame.Sound: {time.time() - t0:.2f}s")
+        sound_next = bus_audio.sonido_desde_archivo(out_path)
+        print(f"[prep]   Sound: {time.time() - t0:.2f}s")
 
         print(f"[prep] ◀ TOTAL: {time.time() - t_total_ini:.2f}s\n")
 
@@ -4409,7 +4348,7 @@ class SeamlessMixerEngine(QObject):
                     audio_export = audio_final.T
                     audio_int16 = np.clip(audio_export, -1.0, 1.0)
                     audio_int16 = (audio_int16 * 32767.0).astype(np.int16)
-                    nuevo_sonido = pygame.sndarray.make_sound(np.ascontiguousarray(audio_int16))
+                    nuevo_sonido = bus_audio.make_sound(np.ascontiguousarray(audio_int16))
 
                     self._evento_bpm_a_listo.clear()
                     try:
@@ -5604,6 +5543,10 @@ class SmartDJPlayer(QMainWindow):
         self.btn_mostrar_lista.setToolTip(tr("ppal_tooltip_mostrar_lista"))
         self.btn_mostrar_lista.clicked.connect(self._alternar_visibilidad_lista)
         fila_botones_lista.addWidget(self.btn_mostrar_lista)
+        self.btn_eq = QPushButton("EQ")
+        self.btn_eq.setToolTip("Ecualizador DJ")
+        self.btn_eq.clicked.connect(self.abrir_ecualizador)
+        fila_botones_lista.addWidget(self.btn_eq)
         fila_botones_lista.addStretch()
         self.chk_modo_mezcla = QCheckBox(tr("ppal_chk_auto"))
         _modo_mezcla_inicial = bool(self.config_data.get("modo_mezcla", True))
@@ -6186,6 +6129,33 @@ class SmartDJPlayer(QMainWindow):
         self._dialogo_consola = dialogo
         dialogo.show()
         dialogo.raise_()
+
+    def abrir_ecualizador(self):
+        """Abre la ventana del Ecualizador DJ integrado; si ya está a la vista, la oculta."""
+        try:
+            ventana = getattr(self, "_ventana_ecualizador", None)
+            if ventana is not None and ventana.isVisible() and not ventana.isMinimized():
+                ventana.hide()
+                return
+            if ventana is None:
+                ventana = ecualizador.crear_ventana(
+                    bus_audio.obtener_bus(), ecualizador.config_actual(),
+                    QApplication.instance(), self)
+                self._ventana_ecualizador = ventana
+                ventana.mostrar_primera_vez()
+            else:
+                if ventana.isMinimized():
+                    ventana.showNormal()
+                else:
+                    ventana.show()
+            ventana.raise_()
+            ventana.activateWindow()
+        except Exception as e:
+            print(f"[ecualizador] No se pudo abrir la ventana: {e}")
+            try:
+                self.update_status(f"Ecualizador: {e}")
+            except Exception:
+                pass
 
     def abrir_configuracion_teclas(self):
         dialogo_existente = getattr(self, "_dialogo_ajustes", None)
@@ -8065,6 +8035,11 @@ class SmartDJPlayer(QMainWindow):
             self.lista_separada.deleteLater()
             self.lista_separada = None
         self.analizador_fondo.detener()
+        try:
+            ecualizador.guardar_config_actual(bus_audio.obtener_bus())
+            bus_audio.obtener_bus().detener()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def eliminar_item_seleccionado(self):
@@ -8258,7 +8233,7 @@ class SmartDJPlayer(QMainWindow):
             # del buffer (que va a hacer on_main_analyzed) no se
             # escuche. El tema sigue cargándose de fondo en silencio.
             try:
-                pygame.mixer.pause()
+                bus_audio.pausar_todo()
             except Exception:
                 pass
             self.engine.set_paused(True)
@@ -8316,7 +8291,7 @@ class SmartDJPlayer(QMainWindow):
                 # para el stream de phase-lock, por las dudas) y en la
                 # GUI (is_playing=False, timer parado, botón ▶).
                 try:
-                    pygame.mixer.pause()
+                    bus_audio.pausar_todo()
                 except Exception:
                     pass
                 self.engine.set_paused(True)
@@ -8325,7 +8300,7 @@ class SmartDJPlayer(QMainWindow):
                 # estado queda consolidado aunque seek_main_track haya
                 # hecho play+pause en el medio.
                 try:
-                    pygame.mixer.pause()
+                    bus_audio.pausar_todo()
                 except Exception:
                     pass
                 self.engine.set_paused(True)
@@ -8449,7 +8424,7 @@ class SmartDJPlayer(QMainWindow):
                     self.engine.start_time_a += tiempo_en_pausa
                     if self.engine.start_time_b > 0:
                         self.engine.start_time_b += tiempo_en_pausa
-                    pygame.mixer.unpause()
+                    bus_audio.reanudar_todo()
                     self.engine.set_paused(False)
                     self._pausado = False
                     self.is_playing = True
@@ -8474,7 +8449,7 @@ class SmartDJPlayer(QMainWindow):
                 self._reanudar_reproduciendo_pendiente = False
                 pos_a, _ = self.engine.get_positions()
                 self._posicion_pausada_seg = pos_a
-                pygame.mixer.pause()
+                bus_audio.pausar_todo()
                 self.engine.set_paused(True)
                 self._pausado = True
                 self._pausa_timestamp = time.time()
@@ -8513,7 +8488,7 @@ class SmartDJPlayer(QMainWindow):
             #
             # El SEGUNDO Stop (con esto ya en pausa) sí vacía las
             # bandejas, ver más abajo.
-            pygame.mixer.pause()
+            bus_audio.pausar_todo()
             self.engine.set_paused(True)
             try:
                 # Mismo mecanismo que la restauración de sesión: hace
@@ -8526,7 +8501,7 @@ class SmartDJPlayer(QMainWindow):
             # Reafirmamos la pausa después del seek, por si el swap
             # reactivó el canal un instante.
             try:
-                pygame.mixer.pause()
+                bus_audio.pausar_todo()
             except Exception:
                 pass
             self.engine.set_paused(True)
@@ -8546,7 +8521,7 @@ class SmartDJPlayer(QMainWindow):
             except Exception:
                 pass
             self.engine._phase_stream = None
-        pygame.mixer.stop()
+        bus_audio.detener_todo()
         self.is_playing = False
         self._pausado = False
         self._pausa_timestamp = 0.0
@@ -8823,9 +8798,17 @@ def lanzar_app(config_data: dict) -> None:
                      name="precalentar-analisis").start()
     _init_dependencias_opcionales()
 
-    import pygame
-    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-    pygame.mixer.set_num_channels(16)
+    # Bus de audio interno (reemplaza al mezclador de pygame) con el Ecualizador DJ
+    # integrado: ya no hace falta ningún cable virtual.
+    bus = bus_audio.obtener_bus()
+    try:
+        ecualizador.preparar(bus)
+    except Exception as e:
+        print(f"[audio] No se pudo preparar el ecualizador (se sigue sin ecualizar): {e}")
+    try:
+        bus.iniciar(ecualizador.config_actual().get("dispositivo_salida", ""))
+    except Exception as e:
+        print(f"[audio] No se pudo abrir la salida de audio: {e}")
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")

@@ -708,11 +708,10 @@ DEPENDENCIAS = _cargar_lista_dependencias() or [
     ("numpy", "numpy"),
     ("soundfile", "soundfile"),
     ("librosa", "librosa"),
-    # pygame-ce (no "pygame" a secas): fork 100% compatible, se importa
-    # igual ("import pygame"), pero trae instaladores al día con versiones
-    # de Python nuevas -- ver config/dependencias_dj.py, que es la lista
-    # que de verdad se usa; esto es solo el respaldo si ese archivo faltara.
-    ("pygame-ce", "pygame"),
+    # pedalboard: motor de efectos del Ecualizador DJ integrado (ya no se usa
+    # pygame: el audio sale por setup/bus_audio.py). La lista que de verdad se
+    # usa es config/dependencias_dj.py; esto es solo el respaldo si faltara.
+    ("pedalboard", "pedalboard"),
     ("scipy", "scipy"),
     ("sounddevice", "sounddevice"),
     ("audiotsm", "audiotsm"),
@@ -1166,4 +1165,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()    # necesario para los procesos de análisis en el .exe
     main()

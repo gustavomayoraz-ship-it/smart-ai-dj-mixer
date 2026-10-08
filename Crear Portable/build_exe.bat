@@ -46,7 +46,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --collect-all sklearn ^
   --collect-all soundfile ^
   --collect-all sounddevice ^
-  --collect-all pygame ^
+  --collect-all pedalboard ^
   --collect-all pooch ^
   --hidden-import audiotsm ^
   "..\dj_player_Mixer.py"
