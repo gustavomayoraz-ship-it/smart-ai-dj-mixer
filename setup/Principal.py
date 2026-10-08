@@ -4420,6 +4420,31 @@ class SeamlessMixerEngine(QObject):
             return self.offset_b_pegajoso
         return None
 
+    def _motivo_precarga_invalida(self, preparado, ruta, fade_duration, offset_esperado):
+        """Texto con la razón por la que lo precargado no sirve para mezclar ahora."""
+        if preparado is None:
+            return "no hay nada precargado"
+        if preparado.get("ruta") != ruta:
+            return f"es de otro tema ({os.path.basename(str(preparado.get('ruta')))})"
+        if abs(preparado.get("fade_duration", -1.0) - float(fade_duration)) >= 0.01:
+            return (f"cambió la duración del cruce (precargado {preparado.get('fade_duration')}"
+                    f" s, ahora {float(fade_duration):.2f} s)")
+        if preparado.get("offset_forzado") != offset_esperado:
+            return (f"cambió el punto de entrada de B (precargado {preparado.get('offset_forzado')}"
+                    f", ahora {offset_esperado})")
+        return "sin motivo"
+
+    def precarga_desactualizada(self, ruta, fade_duration):
+        """Si ya hay un B precargado pero quedó viejo (cambió el cruce o el punto de entrada
+        después de prepararlo), devuelve el motivo; si está bien o no hay nada, None."""
+        with self._lock_preparado_b:
+            preparado = self._preparado_b
+        if preparado is None or preparado.get("ruta") != ruta:
+            return None
+        motivo = self._motivo_precarga_invalida(
+            preparado, ruta, fade_duration, self._offset_entrada_b_para(ruta))
+        return None if motivo == "sin motivo" else motivo
+
     def preload_next_track(self, next_file_path, fade_duration=8.0):
         if not next_file_path or not os.path.exists(next_file_path):
             return
@@ -4432,9 +4457,16 @@ class SeamlessMixerEngine(QObject):
                 self.status_update.emit(
                     f"Precargando y estabilizando: {os.path.basename(next_file_path)}...")
                 offset_forzado = self._offset_entrada_b_para(next_file_path)
+                t_prep = time.monotonic()
+                _log_debug_tempo(
+                    f"PRECARGA: empieza '{os.path.basename(next_file_path)}' "
+                    f"(cruce {float(fade_duration):.2f} s, entrada {offset_forzado})")
                 preparado = self._preparar_mezcla_b(next_file_path, fade_duration, offset_forzado)
                 with self._lock_preparado_b:
                     self._preparado_b = preparado
+                _log_debug_tempo(
+                    f"PRECARGA: lista en {time.monotonic() - t_prep:.1f} s "
+                    f"'{os.path.basename(next_file_path)}'")
                 self.gain_b = preparado["gain_b"]
                 self.pre_load_analyzed.emit(
                     preparado["y_mono_completo_b"], preparado["sr"], preparado["bpm_completo_b"],
@@ -4475,6 +4507,10 @@ class SeamlessMixerEngine(QObject):
 
                 if not usa_precomputado:
                     t_espera_prep = time.monotonic()
+                    _log_debug_tempo(
+                        "MEZCLA: la precarga NO sirve: " + self._motivo_precarga_invalida(
+                            preparado, next_file_path, fade_duration, offset_forzado_esperado)
+                        + f" | precarga en curso={self._prep_en_curso_lock.locked()}")
                     with self._prep_en_curso_lock:
                         # Si había una precarga de B en curso (un tema largo tarda), acá se
                         # esperó a que terminara: antes se la tiraba y se volvía a preparar
@@ -6309,8 +6345,38 @@ class SmartDJPlayer(QMainWindow):
     def update_status(self, text):
         self.lbl_status.setText(f"{tr('ppal_estado_prefijo')}: {text}")
 
+    def _vigilar_precarga_b(self):
+        """Cada ~2 s, mientras suena un tema y no se está mezclando: si el B precargado quedó
+        viejo (cambió la duración del cruce o el punto de entrada después de prepararlo), lo
+        vuelve a preparar YA, con tiempo de sobra, en vez de descubrirlo recién al mezclar
+        (cuando preparar B de cero tardaba 15-50 s y el tema pasaba de largo el recuadro)."""
+        ahora = time.monotonic()
+        if ahora - getattr(self, "_t_vigila_precarga", 0.0) < 2.0:
+            return
+        self._t_vigila_precarga = ahora
+        try:
+            eng = self.engine
+            if eng.is_mixing or eng._prep_en_curso_lock.locked():
+                return
+            if not (0 <= self.next_index < len(self.playlist)):
+                return
+            ruta = self.playlist[self.next_index].ruta
+            fade = self._fade_duration_para(self.current_index, self.next_index)
+            motivo = eng.precarga_desactualizada(ruta, fade)
+            if motivo is None:
+                return
+            clave = (ruta, round(float(fade), 2), eng._offset_entrada_b_para(ruta))
+            if getattr(self, "_clave_reprecarga", None) == clave:
+                return          # ya se reintentó con estos mismos valores: no entrar en bucle
+            self._clave_reprecarga = clave
+            _log_debug_tempo(f"PRECARGA: quedó vieja ({motivo}) -> se prepara de nuevo ahora")
+            self._precargar_b(ruta, fade)
+        except Exception as e:
+            print(f"[dj_player] vigilancia de la precarga: {e}")
+
     def update_play_progress(self):
         if self.is_playing:
+            self._vigilar_precarga_b()
             pos_a, pos_b = self.engine.get_positions()
             self.waveform_current.set_progress(pos_a)
             self._vigilar_fin_de_tema(pos_a)
@@ -6549,6 +6615,11 @@ class SmartDJPlayer(QMainWindow):
             # ese caso, esperamos a que termine de sonar solo -- igual
             # que en modo manual -- y recién ahí frenamos todo.
             if not self.engine.chan_a.get_busy():
+                # Recién arrancó (el tema todavía se está cargando y el canal aún no suena):
+                # no es que terminó. Sin esta espera, al darle play al ÚLTIMO tema de la
+                # lista se frenaba todo al instante y no se veía nada.
+                if not self.waveform_current.is_active or pos_a < 2.0:
+                    return
                 self._mezcla_disparada = True
                 self._avanzar_sin_mezcla()
             return
