@@ -1652,7 +1652,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QPolygonF, QFont, QLinearGradi
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QPushButton, QSlider, QCheckBox, QTabWidget, QMessageBox,
-    QDialog, QGroupBox, QSizePolicy,
+    QDialog, QGroupBox, QSizePolicy, QFrame,
 )
 
 COLOR_ACENTO = "#3ddc84"
@@ -2053,8 +2053,20 @@ class VentanaEcualizador(QWidget):
             cb()
         super().closeEvent(e)
 
+    def _ajustar_alto_minimo(self):
+        """Arranca con la altura mínima en la que entra todo (así no hace falta achicarla
+        a mano). Qt sube el 1 hasta el mínimo real que piden los controles."""
+        try:
+            lay = self.layout()
+            if lay is not None:
+                lay.activate()
+            self.resize(self.width(), 1)
+        except Exception:
+            pass
+
     def mostrar_primera_vez(self):
         self.show()
+        self._ajustar_alto_minimo()
         poner_abajo_izquierda(self)
         self.anclar_abajo_izquierda()
 
@@ -2128,8 +2140,8 @@ def crear_ventana(bus, config, app=None, padre=None):
     w.setStyleSheet(ESTILO)
     w.setWindowTitle(tr("ventana_titulo"))
     w.setMinimumWidth(400)
-    w.setMaximumHeight(570)
-    w.resize(780, 570)
+    w.setMaximumHeight(590)
+    w.resize(780, 590)
     raiz = QVBoxLayout(w)
     raiz.setContentsMargins(6, 6, 6, 6)
     raiz.setSpacing(4)
@@ -2225,7 +2237,7 @@ def crear_ventana(bus, config, app=None, padre=None):
 
     # ---- pestañas ----
     pestanas = QTabWidget()
-    pestanas.setMaximumHeight(320)
+    pestanas.setMaximumHeight(345)
     raiz.addWidget(pestanas)
 
     # Pestaña Objetivo
@@ -2302,8 +2314,8 @@ def crear_ventana(bus, config, app=None, padre=None):
     # Pestaña Multibanda
     t_mb = QWidget()
     gmb = QGridLayout(t_mb)
-    gmb.setContentsMargins(6, 6, 6, 6)
-    gmb.setVerticalSpacing(6)
+    gmb.setContentsMargins(6, 3, 6, 2)
+    gmb.setVerticalSpacing(3)
     gmb.setHorizontalSpacing(8)
 
     fila_top = QHBoxLayout()
@@ -2448,9 +2460,9 @@ def crear_ventana(bus, config, app=None, padre=None):
     # Panel en vivo (solo en automático): medidores que se mueven solos.
     panel_auto = QWidget()
     gpa = QGridLayout(panel_auto)
-    gpa.setContentsMargins(0, 6, 0, 0)
+    gpa.setContentsMargins(0, 2, 0, 0)
     gpa.setHorizontalSpacing(8)
-    gpa.setVerticalSpacing(10)
+    gpa.setVerticalSpacing(5)
     columnas_pa = (
         ("pa_nivel", -60, 0, lambda v: f"{v} dB"),
         ("pa_umbral", -60, 0, lambda v: f"{v} dB"),
@@ -2517,10 +2529,12 @@ def crear_ventana(bus, config, app=None, padre=None):
     chk_mb_auto.toggled.connect(aplicar_modo_mb)
     aplicar_modo_mb()
 
-    # Pestaña Avanzado
+    # Bloque "Avanzado": ya no es una solapa aparte, va al pie de Multibanda (siempre visible,
+    # tanto en modo manual como automático).
     t_av = QWidget()
     ga = QGridLayout(t_av)
-    ga.setContentsMargins(6, 8, 6, 6)
+    ga.setContentsMargins(0, 0, 0, 0)
+    ga.setVerticalSpacing(3)
     s_lim = deslizador(ga, 0, tr("av_max_corr"), 1, 10, config["limite_inteligente_db"],
                        lambda v: f"±{v} dB", AYUDA_MAX_CORRECCION)
     s_vel = deslizador(ga, 1, tr("av_velocidad"), 1, 40, config["velocidad_db_s"],
@@ -2543,8 +2557,19 @@ def crear_ventana(bus, config, app=None, padre=None):
     ga.addWidget(btn_inicio, 5, 0, 1, 3)
     lbl_estado = suave(tr("est_detenido"))
     ga.addWidget(lbl_estado, 6, 0, 1, 3)
-    ga.setRowStretch(7, 1)
-    pestanas.addTab(t_av, tr("tab_avanzado"))
+    cont_av = QWidget()
+    v_av = QVBoxLayout(cont_av)
+    v_av.setContentsMargins(0, 0, 0, 0)
+    v_av.setSpacing(2)
+    linea_av = QFrame()
+    linea_av.setFrameShape(QFrame.HLine)
+    linea_av.setStyleSheet("color: #2a2f39;")
+    lbl_tit_av = QLabel(tr("tab_avanzado"))
+    lbl_tit_av.setStyleSheet("font-weight: bold; color: #f2a33a;")
+    v_av.addWidget(linea_av)
+    v_av.addWidget(lbl_tit_av)
+    v_av.addWidget(t_av)
+    gmb.addWidget(cont_av, 8, 0, 1, 10)
 
     # Pestaña Realce
     t_re = QWidget()
@@ -2765,8 +2790,8 @@ def crear_ventana(bus, config, app=None, padre=None):
         pestanas.setTabText(0, tr("tab_objetivo"))
         pestanas.setTabText(1, tr("tab_manual"))
         pestanas.setTabText(2, tr("tab_multibanda"))
-        pestanas.setTabText(3, tr("tab_avanzado"))
-        pestanas.setTabText(4, tr("tab_realce"))
+        lbl_tit_av.setText(tr("tab_avanzado"))
+        pestanas.setTabText(3, tr("tab_realce"))
         for sl, clave, tt in ((s_golpe, "re_golpe", "tt_re_golpe"), (s_nit, "re_nitidez", "tt_re_nitidez")):
             sl._etq.setText(tr(clave))
             for x in (sl._etq, sl, sl._lbl):

@@ -8042,6 +8042,26 @@ class SmartDJPlayer(QMainWindow):
             pass
         super().closeEvent(event)
 
+    def _hay_tema_activo(self) -> bool:
+        """True si hay un tema realmente en uso por el reproductor: sonando, en pausa o ya cargado
+        en el Deck A. Después del segundo Stop no queda nada cargado: aunque current_index apunte
+        al primer tema de la lista (así lo deja Stop), ese tema NO está sonando y se puede borrar."""
+        try:
+            return bool(self.is_playing or self._pausado
+                        or self.engine.current_sound_a is not None)
+        except Exception:
+            return True
+
+    def _dejar_indices_como_stop(self) -> None:
+        """Sin nada cargado, el tema actual pasa a ser el primero de la lista (como al abrir una
+        lista nueva): se marca, se carga su onda en el Deck A y el Deck B precarga el siguiente."""
+        self.current_index = 0 if self.playlist else -1
+        self.next_index = (self._siguiente_indice_reproducible(self.current_index)
+                           if self.playlist else -1)
+        self.update_playlist_colors()
+        if self.playlist:
+            self.update_waveform_for_current()
+
     def eliminar_item_seleccionado(self):
         item = self.list_widget.currentItem()
         if item is None:
@@ -8055,11 +8075,14 @@ class SmartDJPlayer(QMainWindow):
             return
         if not (0 <= indice < len(self.playlist)):
             return
+        es_el_actual_detenido = False
         if indice == self.current_index:
-            self.list_widget.detener_cadena_borrado()
-            QMessageBox.information(self, tr("ppal_msgbox_no_eliminar_titulo"),
-                                    tr("ppal_msgbox_no_eliminar_sonando"))
-            return
+            if self._hay_tema_activo():
+                self.list_widget.detener_cadena_borrado()
+                QMessageBox.information(self, tr("ppal_msgbox_no_eliminar_titulo"),
+                                        tr("ppal_msgbox_no_eliminar_sonando"))
+                return
+            es_el_actual_detenido = True      # es solo el "actual" que deja Stop: no suena
         era_la_siguiente = (indice == self.next_index)
         pista_eliminada = self.playlist[indice]
         del self.playlist[indice]
@@ -8085,6 +8108,8 @@ class SmartDJPlayer(QMainWindow):
             self.waveform_next.clear()
         elif self.next_index > indice:
             self.next_index -= 1
+        if es_el_actual_detenido:
+            self._dejar_indices_como_stop()
         self._reconstruir_widget_lista()
         self.update_playlist_colors()
         self._seleccionar_fila(fila)
@@ -8106,8 +8131,9 @@ class SmartDJPlayer(QMainWindow):
         if not pistas_grupo:
             return
         ids_grupo = {id(p) for p in pistas_grupo}
-        if 0 <= self.current_index < len(self.playlist) and \
-                id(self.playlist[self.current_index]) in ids_grupo:
+        actual_en_grupo = (0 <= self.current_index < len(self.playlist) and
+                           id(self.playlist[self.current_index]) in ids_grupo)
+        if actual_en_grupo and self._hay_tema_activo():
             self.list_widget.detener_cadena_borrado()
             QMessageBox.information(
                 self, tr("ppal_msgbox_no_eliminar_titulo"),
@@ -8128,6 +8154,9 @@ class SmartDJPlayer(QMainWindow):
         nuevo_orden = [p for p in self.playlist if id(p) not in ids_grupo]
         self.fila_seleccionada_click = -1
         self._reordenar_lista(nuevo_orden)
+        if actual_en_grupo:                  # no sonaba nada: quedan los índices como los deja Stop
+            self._dejar_indices_como_stop()
+            self.update_playlist_colors()
         self._pedir_orden_automatico()
         self._seleccionar_fila(fila_separador)
         self.update_status(tr("ppal_status_temas_eliminados").format(n=cantidad, grupo=nombre_grupo))

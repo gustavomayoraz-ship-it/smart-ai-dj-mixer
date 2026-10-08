@@ -31,8 +31,8 @@ Las librerías que falten se instalan solas en el primer arranque. Para usar el 
 
 - **Activar / Desactivar ecualizador**: prende o apaga el procesamiento (apagado, el sonido sale tal cual).
 - **Bypass**: compara con y sin efecto manteniendo el volumen.
-- Pestaña **Avanzado**: elegí el parlante de salida y tocá *Aplicar salida*. Por defecto usa la salida
-  predeterminada de Windows (WASAPI).
+- Sección **Avanzado** (al pie de la pestaña **Multibanda**): máxima corrección, velocidad, y la elección del
+  parlante de salida con *Aplicar salida*. Por defecto usa la salida predeterminada de Windows (WASAPI).
 
 El ecualizador guarda su configuración en `config/ecualizador_dj_config.json`.
 
