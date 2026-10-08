@@ -16,7 +16,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================
-echo  Smart AI DJ Mixer - generar ejecutable (.exe)
+echo  Smart AI DJ Mixer + Ecualizador DJ - generar ejecutable (.exe)
 echo ============================================
 echo.
 echo Instalando/actualizando PyInstaller...
@@ -49,6 +49,9 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --collect-all pedalboard ^
   --collect-all pooch ^
   --hidden-import audiotsm ^
+  --hidden-import setup.ecualizador ^
+  --hidden-import setup.bus_audio ^
+  --hidden-import setup.analisis_proceso ^
   "..\dj_player_Mixer.py"
 
 if errorlevel 1 (
@@ -75,6 +78,7 @@ echo  Ejecutable: SmartDJMixer\SmartDJMixer.exe
 echo.
 echo  Para llevarlo a otra PC: copia TODA la carpeta
 echo  "SmartDJMixer" completa (no solo el .exe suelto).
-echo  La otra PC no necesita tener Python instalado.
+echo  La otra PC no necesita tener Python instalado ni VB-Cable: el
+echo  Ecualizador DJ esta integrado ^(boton EQ^).
 echo ============================================
 pause
