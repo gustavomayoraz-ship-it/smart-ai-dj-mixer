@@ -743,6 +743,11 @@ class ConfiguracionTeclasDialog(QDialog):
         self.player.config_data["idioma"] = codigo
         guardar_config_app(self.player.config_data)
         establecer_idioma(codigo)
+        try:                                   # el ecualizador sigue al reproductor
+            from setup import bus_audio
+            bus_audio.obtener_bus().fijar_idioma(codigo)
+        except Exception as e:
+            print(f"[idioma] No se pudo avisar al ecualizador: {e}")
         self._retranslar_ajustes()
         self.lbl_confirmacion.setText(f"✅ {nombre_visible}")
         QTimer.singleShot(1500, lambda: self.lbl_confirmacion.setText(""))

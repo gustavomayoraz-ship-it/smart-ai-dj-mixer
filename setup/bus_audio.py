@@ -183,6 +183,8 @@ class BusCliente:
         self._fallos = 0
         self._t_lanzado = 0.0
         self._hwnd_principal = 0
+        self._idioma = None
+        self._local_ventana_idioma = None
         self.ultimo_error = ""
         atexit.register(self._limpiar_memoria)
 
@@ -258,6 +260,8 @@ class BusCliente:
         self._t_lanzado = time.monotonic()
         if self._hwnd_principal:
             self._encolar(("dueno", self._hwnd_principal))
+        if self._idioma:
+            self._encolar(("idioma", self._idioma))
 
     def _matar_servidor(self):
         p, c = self.proc, self.conn
@@ -526,6 +530,25 @@ class BusCliente:
         self._hwnd_principal = int(hwnd or 0)
         if self.local is None and self.proc is not None and self._hwnd_principal:
             self._encolar(("dueno", self._hwnd_principal))
+
+    def fijar_idioma(self, codigo):
+        """Idioma del ecualizador = el del reproductor (se aplica en vivo)."""
+        if not codigo:
+            return
+        self._idioma = str(codigo)
+        if self.local is not None:
+            try:
+                from setup import ecualizador
+                v = self._local_ventana
+                if v is not None:
+                    v.cambiar_idioma_externo(self._idioma)
+                else:
+                    ecualizador.establecer_idioma(self._idioma)
+                    ecualizador.config_actual()["idioma"] = self._idioma
+            except Exception as e:
+                print(f"[ecualizador] No se pudo cambiar el idioma: {e}")
+        elif self.proc is not None:
+            self._encolar(("idioma", self._idioma))
 
     def alternar_ecualizador(self, padre=None):
         """Muestra u oculta la ventana del Ecualizador DJ."""

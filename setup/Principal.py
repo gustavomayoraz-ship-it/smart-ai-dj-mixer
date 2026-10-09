@@ -2945,6 +2945,10 @@ class _PhaseLockedStream:
             self.stream = None
 
 
+class _PrecargaCancelada(Exception):
+    """Se pidió cargar otro tema como B mientras se preparaba este: se abandona la preparación."""
+
+
 class SeamlessMixerEngine(QObject):
     status_update = Signal(str)
     main_track_analyzed = Signal(np.ndarray, int, float, list, list, object, list, int)
@@ -3027,6 +3031,11 @@ class SeamlessMixerEngine(QObject):
         self._preparado_b = None
         self._lock_preparado_b = threading.Lock()
         self._prep_en_curso_lock = threading.Lock()
+        # Precarga cancelable: ruta que se quiere como B ahora, pedido que quedó esperando
+        # mientras otra preparación terminaba, y la ruta que prepara cada hilo.
+        self._ruta_precarga_deseada = None
+        self._precarga_pendiente = None
+        self._local_prep = threading.local()
         self._evento_bpm_a_listo = threading.Event()
         self._phase_stream = None
         self._phase_lock_enabled = False
@@ -3959,10 +3968,12 @@ class SeamlessMixerEngine(QObject):
         t0 = time.time()
         y_next, _ = librosa.load(next_file_path, sr=sr, mono=False)
         print(f"[prep]   load stereo: {time.time() - t0:.2f}s")
+        self._punto_cancelacion()
 
         t0 = time.time()
         y_next_mono = librosa.to_mono(y_next)
         print(f"[prep]   to_mono: {time.time() - t0:.2f}s")
+        self._punto_cancelacion()
 
         t0 = time.time()
         resultado_visual = _analizar_visual_de_archivo(
@@ -3970,6 +3981,7 @@ class SeamlessMixerEngine(QObject):
         print(f"[prep]   analizar_visual: {time.time() - t0:.2f}s "
               f"(y_mono {'None' if resultado_visual['y_mono'] is None else 'presente'})")
 
+        self._punto_cancelacion()
         bpm_b = resultado_visual["bpm"]
         beat_times_b = resultado_visual["beat_times"]
         phrase_boundaries_b = resultado_visual["phrase_boundaries"]
@@ -4045,6 +4057,7 @@ class SeamlessMixerEngine(QObject):
         t0 = time.monotonic()
         y_desde_entrada = _limpiar_hum_y_dc_stereo(y_desde_entrada, sr)
         print(f"[audio]   limpieza DC/hum 50/100 Hz: {time.monotonic() - t0:.2f}s")
+        self._punto_cancelacion()
 
         beat_times_b = [t - mejor_beat_aligned for t in beat_times_b if t >= mejor_beat_aligned]
         phrase_boundaries_b = [t - mejor_beat_aligned for t in phrase_boundaries_b if t >= mejor_beat_aligned]
@@ -4154,6 +4167,7 @@ class SeamlessMixerEngine(QObject):
                 _reforzar_brillo_percusion, y_aligned, sr, intensidad_brillo, "brillo")
             intensidad_aplicada_pct = intensidad_brillo * 100.0
             accion_brillo_golpe = f"manual, agudos reforzados (intensidad {intensidad_brillo*100:.0f}%)"
+        self._punto_cancelacion()
         y_mono_despues = librosa.to_mono(np.asarray(y_aligned, dtype=np.float32))
         brillo_final_relativo = _medir_brillo_relativo(y_mono_despues, sr)
         golpe_final_relativo = _medir_golpe_relativo(y_mono_despues, sr)
@@ -4219,6 +4233,7 @@ class SeamlessMixerEngine(QObject):
         y_mono_definitivo = librosa.to_mono(y_aligned)
         gain_b = 1.0
 
+        self._punto_cancelacion()
         datos_visuales_b = _calcular_visual_onda(y_mono_definitivo, sr)
         print(f"[prep]   calcular_visual_onda (sobre audio procesado): {time.time() - t0:.2f}s")
 
@@ -4420,6 +4435,15 @@ class SeamlessMixerEngine(QObject):
             return self.offset_b_pegajoso
         return None
 
+    def _punto_cancelacion(self):
+        """Lo llama la preparación de B en varios pasos: si se la lanzó como precarga y ya se
+        pidió OTRO tema como B, la abandona (en vez de seguir 25-30 s con un tema que ya no
+        sirve y dejar al nuevo esperando). La preparación que hace la mezcla no se cancela."""
+        ruta = getattr(self._local_prep, "ruta", None)
+        deseada = self._ruta_precarga_deseada
+        if ruta is not None and deseada is not None and deseada != ruta:
+            raise _PrecargaCancelada()
+
     def _motivo_precarga_invalida(self, preparado, ruta, fade_duration, offset_esperado):
         """Texto con la razón por la que lo precargado no sirve para mezclar ahora."""
         if preparado is None:
@@ -4439,7 +4463,7 @@ class SeamlessMixerEngine(QObject):
         después de prepararlo), devuelve el motivo; si está bien o no hay nada, None."""
         with self._lock_preparado_b:
             preparado = self._preparado_b
-        if preparado is None or preparado.get("ruta") != ruta:
+        if preparado is None:
             return None
         motivo = self._motivo_precarga_invalida(
             preparado, ruta, fade_duration, self._offset_entrada_b_para(ruta))
@@ -4448,11 +4472,18 @@ class SeamlessMixerEngine(QObject):
     def preload_next_track(self, next_file_path, fade_duration=8.0):
         if not next_file_path or not os.path.exists(next_file_path):
             return
+        self._ruta_precarga_deseada = next_file_path
 
         def _preload_process():
             if not self._prep_en_curso_lock.acquire(blocking=False):
-                self.status_update.emit("⏳ Ya hay una precarga de B en curso, se omite este pedido.")
+                # Ya hay una preparación en marcha: si era de otro tema se cancela sola en su
+                # próximo paso y esta queda esperando su turno (antes se descartaba el pedido
+                # y el tema elegido nunca se cargaba).
+                self._precarga_pendiente = (next_file_path, fade_duration)
+                self.status_update.emit("⏳ Otra precarga en curso: este tema se carga a continuación.")
                 return
+            cancelada = False
+            self._local_prep.ruta = next_file_path
             try:
                 self.status_update.emit(
                     f"Precargando y estabilizando: {os.path.basename(next_file_path)}...")
@@ -4462,28 +4493,44 @@ class SeamlessMixerEngine(QObject):
                     f"PRECARGA: empieza '{os.path.basename(next_file_path)}' "
                     f"(cruce {float(fade_duration):.2f} s, entrada {offset_forzado})")
                 preparado = self._preparar_mezcla_b(next_file_path, fade_duration, offset_forzado)
-                with self._lock_preparado_b:
-                    self._preparado_b = preparado
+                if self._ruta_precarga_deseada not in (None, next_file_path):
+                    cancelada = True          # terminó, pero ya se pidió otro tema como B
+                    _log_debug_tempo(
+                        f"PRECARGA: descartada (se pidió otro tema) '{os.path.basename(next_file_path)}'")
+                else:
+                    with self._lock_preparado_b:
+                        self._preparado_b = preparado
+                    _log_debug_tempo(
+                        f"PRECARGA: lista en {time.monotonic() - t_prep:.1f} s "
+                        f"'{os.path.basename(next_file_path)}'")
+                    self.gain_b = preparado["gain_b"]
+                    self.pre_load_analyzed.emit(
+                        preparado["y_mono_completo_b"], preparado["sr"], preparado["bpm_completo_b"],
+                        list(preparado["beat_times_completo_b"]), fade_duration,
+                        preparado["kick_time_completo_b"],
+                        list(preparado["phrase_boundaries_completo_b"]),
+                        preparado["datos_visuales_completo_b"],
+                        list(preparado["downbeat_times_completo_b"]),
+                        preparado["fase_downbeat_completo_b"],
+                        preparado["offset_entrada_b"])
+                    self.status_update.emit("Pista siguiente nivelada y lista.")
+            except _PrecargaCancelada:
+                cancelada = True
                 _log_debug_tempo(
-                    f"PRECARGA: lista en {time.monotonic() - t_prep:.1f} s "
-                    f"'{os.path.basename(next_file_path)}'")
-                self.gain_b = preparado["gain_b"]
-                self.pre_load_analyzed.emit(
-                    preparado["y_mono_completo_b"], preparado["sr"], preparado["bpm_completo_b"],
-                    list(preparado["beat_times_completo_b"]), fade_duration,
-                    preparado["kick_time_completo_b"],
-                    list(preparado["phrase_boundaries_completo_b"]),
-                    preparado["datos_visuales_completo_b"],
-                    list(preparado["downbeat_times_completo_b"]),
-                    preparado["fase_downbeat_completo_b"],
-                    preparado["offset_entrada_b"])
-                self.status_update.emit("Pista siguiente nivelada y lista.")
+                    f"PRECARGA: cancelada a mitad de camino '{os.path.basename(next_file_path)}' "
+                    "(se pidió otro tema como B)")
             except Exception as e:
                 with self._lock_preparado_b:
                     self._preparado_b = None
                 self.status_update.emit(f"Error al precargar pista: {str(e)}")
             finally:
+                self._local_prep.ruta = None
                 self._prep_en_curso_lock.release()
+            # Si mientras tanto llegó otro pedido, arranca ahora (salvo que sea justo el tema
+            # que acaba de quedar listo).
+            pendiente, self._precarga_pendiente = self._precarga_pendiente, None
+            if pendiente is not None and (cancelada or pendiente[0] != next_file_path):
+                self.preload_next_track(pendiente[0], pendiente[1])
 
         threading.Thread(target=_preload_process, daemon=True).start()
 
@@ -6303,13 +6350,14 @@ class SmartDJPlayer(QMainWindow):
         self.waveform_next.update()
 
     def toggle_modo_aleatorio(self):
-        """Prende/apaga el modo aleatorio (botón junto al buscador de la
-        lista separada). Prendido: el próximo tema (manual o automático,
-        ver _siguiente_indice_reproducible) se sortea entre los no
-        reproducidos todavía en esta tanda. Apagado: la lista "vuelve a
+        """Prende/apaga el modo "siguiente más compatible" (botón junto al buscador de la
+        lista separada; antes era el aleatorio). Prendido: el próximo tema (manual o
+        automático, ver _siguiente_indice_reproducible) es el que mejor mezcla con el actual
+        entre los no reproducidos todavía en esta tanda. Apagado: la lista "vuelve a
         su estado normal" -- se borran las marcas ✔ y el siguiente tema
         vuelve a ser, simplemente, el próximo de la lista."""
         self.modo_aleatorio_activo = not self.modo_aleatorio_activo
+        self._siguiente_compatible_elegido = None
         if not self.modo_aleatorio_activo:
             self._pistas_sonadas_aleatorio.clear()
         elif 0 <= self.current_index < len(self.playlist):
@@ -6322,6 +6370,7 @@ class SmartDJPlayer(QMainWindow):
                 self.next_index = nuevo_next
                 if nuevo_next != -1 and not self.engine.is_mixing:
                     next_track_path = self.playlist[nuevo_next].ruta
+                    self._iniciar_progreso_carga(nuevo_next, self.playlist[nuevo_next].duracion)
                     self._precargar_b(
                         next_track_path,
                         self._fade_duration_para(self.current_index, nuevo_next))
@@ -6362,6 +6411,20 @@ class SmartDJPlayer(QMainWindow):
                 return
             ruta = self.playlist[self.next_index].ruta
             fade = self._fade_duration_para(self.current_index, self.next_index)
+            if getattr(self, "_ruta_b_precargada", None) != ruta and not self._mezcla_disparada:
+                # La bandeja B muestra (o está por mostrar) OTRO tema distinto del que ahora
+                # corresponde como siguiente (cambió el tema actual o el siguiente por una vía
+                # que no pidió precarga): se vacía y se pide la carga del correcto.
+                try:
+                    if self.waveform_next.peaks.size > 0:
+                        self.waveform_next.clear()
+                except Exception:
+                    pass
+                self._preload_disparado_para = (ruta, self._tiempo_mezcla())
+                self._iniciar_progreso_carga(
+                    self.next_index, self.playlist[self.next_index].duracion)
+                self._precargar_b(ruta, fade)
+                return
             motivo = eng.precarga_desactualizada(ruta, fade)
             if motivo is None:
                 return
@@ -7196,11 +7259,28 @@ class SmartDJPlayer(QMainWindow):
         return -1
 
     def _siguiente_indice_aleatorio(self, desde_indice):
-        """Sortea un índice reproducible (sin saltear) que no se haya
-        sorteado todavía en esta tanda de modo aleatorio, distinto del
-        actual. Si ya se agotaron todos, reinicia la tanda (dejando
-        marcado nomás el actual) para que el aleatorio siga sonando sin
-        cortarse en vez de quedarse sin "siguiente" para siempre."""
+        """Modo "siguiente más compatible" (antes: aleatorio). Entre los temas reproducibles
+        (sin saltear) que todavía no sonaron en esta tanda elige el que mejor mezcla con el
+        actual: el de menor costo de transición según BPM cercano, tono compatible (rueda
+        Camelot) y, si está activado el criterio de energía, energía parecida (ver
+        _costo_transicion). Los temas todavía sin analizar quedan últimos. Si hay empate se
+        sortea entre los empatados. Si ya sonaron todos, reinicia la tanda (dejando marcado
+        nomás el actual) para que siga sonando sin quedarse sin "siguiente"."""
+        # La elección tiene que ser ESTABLE: esta función se llama muchas veces mientras
+        # suena el tema (al precargar B, al terminar un análisis, al mezclar...). Si cada
+        # llamada pudiera dar otro resultado (sorteo entre empates, un BPM que se terminó de
+        # analizar), B se precargaba para un tema y la mezcla terminaba pidiendo otro: había
+        # que preparar B de cero y el tema se pasaba de largo el recuadro de mezcla.
+        # Por eso se recuerda lo elegido para el tema actual mientras siga siendo válido.
+        if 0 <= desde_indice < len(self.playlist):
+            elegido = getattr(self, "_siguiente_compatible_elegido", None)
+            if elegido is not None and elegido[0] is self.playlist[desde_indice]:
+                for i, p in enumerate(self.playlist):
+                    if p is elegido[1]:
+                        if (not p.saltear and i != desde_indice
+                                and id(p) not in self._pistas_sonadas_aleatorio):
+                            return i
+                        break
         candidatos = [
             i for i, p in enumerate(self.playlist)
             if not p.saltear and i != desde_indice
@@ -7217,7 +7297,15 @@ class SmartDJPlayer(QMainWindow):
             ]
         if not candidatos:
             return -1
-        return random.choice(candidatos)
+        if not (0 <= desde_indice < len(self.playlist)):
+            return candidatos[0]
+        actual = self.playlist[desde_indice]
+        costos = {i: _costo_transicion(actual, self.playlist[i]) for i in candidatos}
+        mejor = min(costos.values())
+        empatados = [i for i in candidatos if costos[i] <= mejor + 1e-9]
+        elegido_idx = random.choice(empatados)
+        self._siguiente_compatible_elegido = (actual, self.playlist[elegido_idx])
+        return elegido_idx
 
     def _anterior_indice_reproducible(self, desde_indice):
         for i in range(desde_indice - 1, -1, -1):
@@ -7226,9 +7314,6 @@ class SmartDJPlayer(QMainWindow):
         return -1
 
     def _primer_indice_reproducible(self):
-        if self.modo_aleatorio_activo:
-            candidatos = [i for i, p in enumerate(self.playlist) if not p.saltear]
-            return random.choice(candidatos) if candidatos else -1
         for i in range(len(self.playlist)):
             if not self.playlist[i].saltear:
                 return i
@@ -7254,9 +7339,14 @@ class SmartDJPlayer(QMainWindow):
             return
         if nuevo_next != -1:
             next_track_path = self.playlist[nuevo_next].ruta
+            # Igual que el doble clic: bandeja B vacía y el degradé de carga pasa al tema
+            # nuevo (antes seguía "cargando" el que se acababa de saltear).
+            self.waveform_next.clear()
+            self._iniciar_progreso_carga(nuevo_next, self.playlist[nuevo_next].duracion)
             self._precargar_b(
                 next_track_path, self._fade_duration_para(self.current_index, nuevo_next))
         else:
+            self._detener_progreso_carga()
             self.waveform_next.clear()
 
     def agregar_archivos_a_playlist(self, rutas, carpeta_path=None, nombre_carpeta=None):
@@ -8883,6 +8973,7 @@ def lanzar_app(config_data: dict) -> None:
     # Motor de audio (mezcla + Ecualizador DJ + salida) en un proceso aparte: así nada de lo
     # que haga el programa puede cortar el sonido. Arranca en paralelo mientras se arma la ventana.
     bus = bus_audio.obtener_bus()
+    bus.fijar_idioma(config_data.get("idioma", "es"))   # el ecualizador usa el idioma del reproductor
     try:
         bus.iniciar()
     except Exception as e:

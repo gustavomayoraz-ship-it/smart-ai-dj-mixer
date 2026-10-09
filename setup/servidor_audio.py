@@ -238,10 +238,12 @@ class _Servidor:
         class _Puente(QObject):
             alternar = Signal()
             dueno = Signal(int)
+            idioma = Signal(str)
 
         self.puente = _Puente()
         self.puente.alternar.connect(self._alternar_ventana, Qt.QueuedConnection)
         self.puente.dueno.connect(self._fijar_dueno, Qt.QueuedConnection)
+        self.puente.idioma.connect(self._cambiar_idioma, Qt.QueuedConnection)
 
         self.bus = bn.BusAudio()
         self.bus.gancho_estado = self.publicar
@@ -258,6 +260,7 @@ class _Servidor:
             print(f"[audio] No se pudo abrir la salida de audio: {e}")
             listo = LISTO_SIN_SALIDA
         try:
+            sys._fusion_integrado = True      # sin botón de idioma propio: se elige en el reproductor
             self.ventana = ecualizador.crear_ventana(self.bus, ecualizador.config_actual(), app, None)
             self.ventana.hide()
         except Exception as e:
@@ -269,6 +272,18 @@ class _Servidor:
         app.exec()
 
     # ---- ventana del ecualizador ----
+    def _cambiar_idioma(self, cod):
+        """Idioma elegido en Ajustes del reproductor: se aplica al ecualizador en vivo."""
+        try:
+            self.ecualizador.establecer_idioma(cod)
+            cfg = self.ecualizador.config_actual()
+            cfg["idioma"] = cod
+            if self.ventana is not None:
+                self.ventana.cambiar_idioma_externo(cod)
+            self.ecualizador.guardar_config_actual(self.bus)
+        except Exception as e:
+            print(f"[ecualizador] No se pudo cambiar el idioma: {e}")
+
     def _alternar_ventana(self):
         v = self.ventana
         if v is None:
@@ -362,6 +377,8 @@ class _Servidor:
             self.puente.alternar.emit()
         elif tipo == "dueno":
             self.puente.dueno.emit(int(orden[1]))
+        elif tipo == "idioma":
+            self.puente.idioma.emit(str(orden[1]))
         elif tipo == "volcar":                       # solo pruebas
             ruta = orden[1]
             if self.captura:

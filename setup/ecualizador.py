@@ -2837,6 +2837,13 @@ def crear_ventana(bus, config, app=None, padre=None):
         btn_mb_reset.setText(tr("mb_reset"))
         btn_mb_reset.setToolTip(tr("tt_mb_reset"))
         lbl_mb_nota.setText(tr("mb_nota"))
+        for e, tt_clave, clave_txt in cabeceras_mb:
+            e.setText(tr(clave_txt))
+            e.setToolTip(tr(tt_clave))
+        for cab, clave_b in zip(cabs_mb, ("mb_banda_graves", "mb_banda_medios", "mb_banda_agudos")):
+            cab.setText(tr(clave_b))
+        for _e, sl, _lbl, tt_clave in refs_mb:
+            sl.setToolTip(tr(tt_clave))
         for sl, clave, k in ((s_lim, "av_max_corr", "maxcorr"), (s_vel, "av_velocidad", "velocidad")):
             sl._etq.setText(tr(clave))
             for x in (sl._etq, sl, sl._lbl):
@@ -2893,6 +2900,21 @@ def crear_ventana(bus, config, app=None, padre=None):
         d.exec()
 
     btn_aj.clicked.connect(abrir_ajustes)
+
+    # Integrado al reproductor: el idioma se cambia desde Ajustes del reproductor,
+    # así que el botón de ajustes propio sobra. Se deja disponible para quien use
+    # el ecualizador suelto (ecualizador.py solo).
+    def cambiar_idioma_externo(cod):
+        """Lo llama el reproductor: cambia el idioma en vivo y lo guarda."""
+        if not cod:
+            return
+        config["idioma"] = cod
+        establecer_idioma(cod)
+        aplicar_idioma()
+
+    w.cambiar_idioma_externo = cambiar_idioma_externo
+    if padre is not None or getattr(sys, "_fusion_integrado", False):
+        btn_aj.hide()
 
     ciclo = {"n": 0, "maximos": []}
 
