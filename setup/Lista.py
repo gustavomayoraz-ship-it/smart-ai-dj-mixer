@@ -577,13 +577,15 @@ class DropListWidget(QListWidget):
         p.end()
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        # Un arrastre interno (reordenar) también lleva la ruta como URL (ver startDrag):
+        # solo es "archivos desde afuera" si NO viene de esta misma lista.
+        if event.mimeData().hasUrls() and event.source() is not self:
             event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and event.source() is not self:
             event.acceptProposedAction()
             return
         try:
@@ -860,7 +862,7 @@ class VentanaListaSeparada(QWidget):
         """Actualiza el ícono/tooltip del botón de modo aleatorio según
         el estado actual (lo llama Principal.toggle_modo_aleatorio)."""
         if activo:
-            self.btn_aleatorio.setText("🔀")
+            self.btn_aleatorio.setText("🔗")
             self.btn_aleatorio.setToolTip(tr("lista_tooltip_aleatorio_on"))
         else:
             self.btn_aleatorio.setText("☰")
