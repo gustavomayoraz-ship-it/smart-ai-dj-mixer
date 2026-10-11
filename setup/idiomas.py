@@ -93,8 +93,8 @@ TEXTOS = {
         "ppal_tooltip_modo_mezcla": "Auto: los temas se mezclan con crossfade al llegar al\nrecuadro amarillo (modo mezcla automática).\nMan: cada tema termina y pasa directo al siguiente,\nsin cruce ni recuadro (modo manual).",
         "ppal_tooltip_waveform_next": "Arrastrá el recuadro amarillo para mover a mano el punto\ndonde este tema entra en la próxima mezcla.",
         "ppal_tooltip_golpe_seco_barra": "Golpe seco: nivel de energía del bombo (banda 60-120 Hz)\ndel tema entrante, medido en vivo. Se ilumina cuando hay\ngolpe de bombo y baja solo entre golpes.",
-        "ppal_status_aleatorio_on": "🔀 Modo aleatorio activado.",
-        "ppal_status_aleatorio_off": "☰ Modo aleatorio desactivado, la lista vuelve a su orden normal.",
+        "ppal_status_aleatorio_on": "🔗 Modo siguiente más compatible activado: se elige el tema que mejor mezcla con el actual (BPM, tono y energía).",
+        "ppal_status_aleatorio_off": "☰ Modo siguiente más compatible desactivado, la lista vuelve a su orden normal.",
         "ppal_status_no_audios": "No se encontraron audios en {carpeta}",
         "ppal_status_orden_manual_actualizado": "✋ Orden manual actualizado.",
         "ppal_status_orden_auto_desactivado": "✋ Moviste un tema a mano. Orden automático desactivado (usá 🔀 Reordenar auto para volver a activarlo).",
@@ -140,8 +140,8 @@ TEXTOS = {
         "consola_titulo": "🖥 Consola",
         "consola_btn_copiar": "Copiar todo",
         "consola_btn_limpiar": "Limpiar",
-        "lista_tooltip_aleatorio_on": "Modo aleatorio ACTIVADO: los temas se van sorteando sin repetir. Click para volver al orden normal de la lista.",
-        "lista_tooltip_aleatorio_off": "Orden normal. Click para activar el modo aleatorio (los temas se van sorteando sin repetir hasta agotar la lista).",
+        "lista_tooltip_aleatorio_on": "Siguiente más compatible ACTIVADO: se elige el tema que mejor mezcla con el actual (BPM, tono y energía), sin repetir. Click para volver al orden normal de la lista.",
+        "lista_tooltip_aleatorio_off": "Orden normal. Click para activar el modo siguiente más compatible (se elige el tema que mejor mezcla con el actual, sin repetir hasta agotar la lista).",
 
         # --- Ajustes: paneles individuales y editor de skins (Stage 3) ---
         "ajustes_lbl_anterior": "Anterior:",
@@ -258,8 +258,8 @@ TEXTOS = {
         "ppal_tooltip_modo_mezcla": "Auto: tracks crossfade into each other once the\nyellow marker is reached (automatic mix mode).\nMan: each track ends and moves straight to the next,\nwith no crossfade or marker (manual mode).",
         "ppal_tooltip_waveform_next": "Drag the yellow marker to manually move the point\nwhere this track enters the next mix.",
         "ppal_tooltip_golpe_seco_barra": "Kick punch: kick-drum energy level (60-120 Hz band)\nof the incoming track, measured live. Lights up on each\nkick and fades between hits.",
-        "ppal_status_aleatorio_on": "🔀 Shuffle mode enabled.",
-        "ppal_status_aleatorio_off": "☰ Shuffle mode disabled, the list is back to its normal order.",
+        "ppal_status_aleatorio_on": "🔗 Best-match-next mode enabled: the track that mixes best with the current one (BPM, key and energy) is picked.",
+        "ppal_status_aleatorio_off": "☰ Best-match-next mode disabled, the list is back to its normal order.",
         "ppal_status_no_audios": "No audio files found in {carpeta}",
         "ppal_status_orden_manual_actualizado": "✋ Manual order updated.",
         "ppal_status_orden_auto_desactivado": "✋ You moved a track by hand. Auto order disabled\n(use 🔀 Auto-reorder to turn it back on).",
@@ -305,8 +305,8 @@ TEXTOS = {
         "consola_titulo": "🖥 Console",
         "consola_btn_copiar": "Copy all",
         "consola_btn_limpiar": "Clear",
-        "lista_tooltip_aleatorio_on": "Shuffle mode ON: tracks are drawn without repeats.\nClick to go back to the list's normal order.",
-        "lista_tooltip_aleatorio_off": "Normal order. Click to enable shuffle mode (tracks are\ndrawn without repeats until the list runs out).",
+        "lista_tooltip_aleatorio_on": "Best-match-next ON: the track that mixes best with the current\none (BPM, key, energy) is picked, without repeats.\nClick to go back to the list's normal order.",
+        "lista_tooltip_aleatorio_off": "Normal order. Click to enable best-match-next mode (the track\nthat mixes best with the current one, no repeats until the list runs out).",
 
         # --- Ajustes: paneles individuales y editor de skins (Stage 3) ---
         "ajustes_lbl_anterior": "Previous:",
@@ -423,8 +423,8 @@ TEXTOS = {
         "ppal_tooltip_modo_mezcla": "Auto: as faixas se mixam com transição ao chegar no\nmarcador amarelo (modo de mixagem automática).\nMan: cada faixa termina e passa direto para a próxima,\nsem transição nem marcador (modo manual).",
         "ppal_tooltip_waveform_next": "Arraste o marcador amarelo para mover manualmente o ponto\nonde esta faixa entra na próxima mixagem.",
         "ppal_tooltip_golpe_seco_barra": "Batida seca: nível de energia do bumbo (banda 60-120 Hz)\nda faixa que está entrando, medido ao vivo. Acende a cada\nbatida e diminui entre uma e outra.",
-        "ppal_status_aleatorio_on": "🔀 Modo aleatório ativado.",
-        "ppal_status_aleatorio_off": "☰ Modo aleatório desativado, a lista volta à ordem normal.",
+        "ppal_status_aleatorio_on": "🔗 Modo próxima mais compatível ativado: escolhe-se a faixa que melhor mistura com a atual (BPM, tom e energia).",
+        "ppal_status_aleatorio_off": "☰ Modo próxima mais compatível desativado, a lista volta à ordem normal.",
         "ppal_status_no_audios": "Nenhum áudio encontrado em {carpeta}",
         "ppal_status_orden_manual_actualizado": "✋ Ordem manual atualizada.",
         "ppal_status_orden_auto_desactivado": "✋ Você moveu uma faixa manualmente. Ordem automática\ndesativada (use 🔀 Reordenar automaticamente para reativá-la).",
@@ -470,8 +470,8 @@ TEXTOS = {
         "consola_titulo": "🖥 Console",
         "consola_btn_copiar": "Copiar tudo",
         "consola_btn_limpiar": "Limpar",
-        "lista_tooltip_aleatorio_on": "Modo aleatório ATIVADO: as faixas vão sendo sorteadas\nsem repetir. Clique para voltar à ordem normal da lista.",
-        "lista_tooltip_aleatorio_off": "Ordem normal. Clique para ativar o modo aleatório (as\nfaixas vão sendo sorteadas sem repetir até esgotar a lista).",
+        "lista_tooltip_aleatorio_on": "Próxima mais compatível ATIVADO: escolhe-se a faixa que melhor\nmistura com a atual (BPM, tom, energia), sem repetir.\nClique para voltar à ordem normal da lista.",
+        "lista_tooltip_aleatorio_off": "Ordem normal. Clique para ativar o modo próxima mais compatível\n(a faixa que melhor mistura com a atual, sem repetir até esgotar a lista).",
 
         # --- Ajustes: paneles individuales y editor de skins (Stage 3) ---
         "ajustes_lbl_anterior": "Anterior:",
@@ -526,6 +526,12 @@ TEXTOS = {
         "ajustes_chk_recortar_silencio": "Cortar silêncio final",
     },
 }
+
+# Textos de la ventana de Ajustes (archivo aparte para no inflar este).
+from setup.idiomas_ajustes import AJ_ES, AJ_EN, AJ_PT
+TEXTOS["es"].update(AJ_ES)
+TEXTOS["en"].update(AJ_EN)
+TEXTOS["pt"].update(AJ_PT)
 
 _idioma_actual = IDIOMA_POR_DEFECTO
 

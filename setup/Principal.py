@@ -6236,7 +6236,9 @@ class SmartDJPlayer(QMainWindow):
         dialogo = ConfiguracionTeclasDialog(self)
         dialogo.setWindowModality(Qt.NonModal)
         dialogo.setAttribute(Qt.WA_DeleteOnClose, True)
-        dialogo.destroyed.connect(lambda *_: setattr(self, "_dialogo_ajustes", None))
+        dialogo.destroyed.connect(
+            lambda *_: setattr(self, "_dialogo_ajustes", None)
+            if getattr(self, "_dialogo_ajustes", None) is dialogo else None)
         self._dialogo_ajustes = dialogo
         dialogo.show()
         dialogo.raise_()
@@ -7931,7 +7933,7 @@ class SmartDJPlayer(QMainWindow):
         self._reordenar_en_fondo_tono(tr("ppal_status_ordenando_tono_fondo"))
 
     def on_checkbox_ordenar_toggled(self, checked):
-        self.chk_ordenar_por_tono.setText("Tono" if checked else "BPM")
+        self.chk_ordenar_por_tono.setText(tr("aj_tono") if checked else "BPM")
         if not self.playlist:
             return
         self.orden_automatico_activo = True
