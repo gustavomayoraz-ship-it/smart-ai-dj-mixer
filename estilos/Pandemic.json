@@ -1,0 +1,18 @@
+{
+  "fondo_ventana": "#141414",
+  "fondo_panel": "#1e1e1e",
+  "fondo_widget": "#000000",
+  "fondo_lista": "#363636",
+  "fondo_item_normal": "#121212",
+  "fondo_item_hover": "#2a2a2a",
+  "texto_normal": "#ffffff",
+  "texto_secundario": "#9aa0a6",
+  "acento": "#aaff00",
+  "color_slider": "#aaff00",
+  "acento_oscuro": "#0d3d2a",
+  "borde": "#ff0000",
+  "borde_fuerte": "#4a4a4a",
+  "seleccion_fondo": "#0d3d2a",
+  "seleccion_texto": "#00ff80",
+  "nombre": "Pandemic"
+}

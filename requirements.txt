@@ -1,0 +1,9 @@
+# Probado con Python 3.10 a 3.13 (recomendado 3.13). Con 3.14 o más nuevo puede fallar: ver README.
+PySide6
+pedalboard
+librosa
+numpy
+scipy
+sounddevice
+soundfile
+audiotsm
